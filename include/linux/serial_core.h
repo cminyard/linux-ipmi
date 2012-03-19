@@ -547,6 +547,12 @@ static inline int uart_handle_break(struct uart_port *port)
 	return 0;
 }
 
+static inline void
+uart_push(struct uart_port *port)
+{
+	tty_flip_buffer_push(port->state->port.tty);
+}
+
 /*
  *	UART_ENABLE_MS - determine if port should enable modem status irqs
  */
