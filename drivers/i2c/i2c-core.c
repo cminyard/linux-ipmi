@@ -56,6 +56,7 @@
 
 #include "i2c-core.h"
 
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/i2c.h>
 
@@ -70,6 +71,10 @@ static DEFINE_IDR(i2c_adapter_idr);
 
 static struct device_type i2c_client_type;
 static int i2c_detect(struct i2c_adapter *adapter, struct i2c_driver *driver);
+static enum hrtimer_restart i2c_handle_timer(struct hrtimer *hrtimer);
+static int i2c_start_next_entry(struct i2c_adapter *adap,
+				struct i2c_op_q_entry *myentry);
+static void i2c_op_done_tasklet(unsigned long tdata);
 
 static struct static_key i2c_trace_msg = STATIC_KEY_INIT_FALSE;
 
@@ -1558,10 +1563,22 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 
 	if (parent) {
 		adap->bus_lock = parent->bus_lock;
+		adap->q_lock = parent->q_lock;
+		adap->q = parent->q;
+		adap->timer = parent->timer;
 	} else {
 		rt_mutex_init(&adap->real_bus_lock);
 		adap->bus_lock = &adap->real_bus_lock;
+		spin_lock_init(&adap->real_q_lock);
+		adap->q_lock = &adap->real_q_lock;
+		INIT_LIST_HEAD(&adap->real_q);
+		adap->q = &adap->real_q;
+		hrtimer_init(&adap->real_timer, CLOCK_MONOTONIC,
+			     HRTIMER_MODE_REL);
+		adap->real_timer.function = i2c_handle_timer;
+		adap->timer = &adap->real_timer;
 	}
+	tasklet_init(&adap->tasklet, i2c_op_done_tasklet, (unsigned long) adap);
 
 	/* Set default timeout to 1 second if not already set */
 	if (adap->timeout == 0)
@@ -1830,6 +1847,9 @@ void i2c_del_adapter(struct i2c_adapter *adap)
 
 	/* device name is gone after device_unregister */
 	dev_dbg(&adap->dev, "adapter [%s] unregistered\n", adap->name);
+
+	hrtimer_cancel(adap->timer);
+	tasklet_kill(&adap->tasklet);
 
 	/* wait until all references to the device are gone
 	 *
@@ -2106,6 +2126,42 @@ postcore_initcall(i2c_init);
 module_exit(i2c_exit);
 
 /* ----------------------------------------------------
+ * Timer operations
+ * ----------------------------------------------------
+ */
+void i2c_start_timer(struct i2c_op_q_entry *entry)
+{
+	struct i2c_adapter *adap = entry->adap;
+	unsigned long flags;
+
+	spin_lock_irqsave(adap->q_lock, flags);
+	if (entry->use_timer && entry->state == I2C_OP_RUNNING)
+		hrtimer_start(entry->adap->timer,
+			      ktime_add_ns(ktime_get(), entry->call_again_ns),
+			      HRTIMER_MODE_ABS);
+	spin_unlock_irqrestore(adap->q_lock, flags);
+}
+EXPORT_SYMBOL(i2c_start_timer);
+
+static enum hrtimer_restart i2c_handle_timer(struct hrtimer *hrtimer)
+{
+	struct i2c_adapter *adap = container_of(hrtimer, struct i2c_adapter,
+						real_timer);
+	struct i2c_op_q_entry *entry;
+
+	entry = i2c_entry_get(adap);
+	pr_debug("i2c_handle_timer: %p %p\n", adap, entry);
+	if (entry) {
+		adap = entry->adap;
+		adap->algo->poll(adap, entry, entry->call_again_ns);
+		i2c_start_timer(entry);
+		i2c_entry_put(entry);
+	}
+
+	return HRTIMER_NORESTART;
+}
+
+/* ----------------------------------------------------
  * the functional interface to the i2c busses.
  * ----------------------------------------------------
  */
@@ -2224,23 +2280,47 @@ int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 }
 EXPORT_SYMBOL(__i2c_transfer);
 
-/**
- * i2c_transfer - execute a single or combined I2C message
- * @adap: Handle to I2C bus
- * @msgs: One or more messages to execute before STOP is issued to
- *	terminate the operation; each message begins with a START.
- * @num: Number of messages to be executed.
- *
- * Returns negative errno, else the number of messages executed.
- *
- * Note that there is no requirement that each message be sent to
- * the same slave address, although that is the most common model.
- */
+static void i2c_init_entry(struct i2c_adapter *adap,
+			   struct i2c_op_q_entry *entry)
+{
+	entry->adap = adap;
+	init_completion(&entry->done);
+	entry->state = I2C_OP_QUEUED;
+	entry->result = 0;
+	entry->data = NULL;
+	entry->end_jiffies = jiffies + adap->timeout;
+	entry->tries = 0;
+	kref_init(&entry->usecount);
+	entry->use_timer = false;
+	entry->call_again_ns = 0;
+}
+
+static void i2c_wait_done(struct i2c_op_q_entry *entry)
+{
+	pr_debug("i2c_wait_complete %p\n", entry);
+	complete(&entry->done);
+}
+
+static void i2c_perform_op_wait(struct i2c_adapter *adap,
+				struct i2c_op_q_entry *entry)
+{
+	int ret = 0;
+
+	pr_debug("i2c_perform_op_wait %p %p\n", adap, entry);
+	entry->handler = i2c_wait_done;
+
+	ret = i2c_start_next_entry(adap, entry);
+	if (!ret)
+		wait_for_completion(&entry->done);
+}
+
 static void i2c_transfer_entry(struct i2c_adapter *adap,
 			       struct i2c_op_q_entry *entry,
 			       bool do_lock)
 {
-	const struct i2c_algorithm *algo = adap->algo;
+#ifdef DEBUG
+	int ret;
+#endif
 
 	/* REVISIT the fault reporting model here is weak:
 	 *
@@ -2260,22 +2340,20 @@ static void i2c_transfer_entry(struct i2c_adapter *adap,
 	 */
 
 	entry->xfer_type = I2C_OP_I2C;
-	if (algo->master_xfer) {
 #ifdef DEBUG
-		int ret;
-
-		for (ret = 0; ret < entry->i2c.num; ret++) {
-			dev_dbg(&adap->dev,
-				"master_xfer[%d] %c, addr=0x%02x, len=%d%s\n",
-				ret, (entry->i2c.msgs[ret].flags & I2C_M_RD ?
-				      'R' : 'W'),
-				entry->i2c.msgs[ret].addr,
-				entry->i2c.msgs[ret].len,
-				((entry->i2c.msgs[ret].flags & I2C_M_RECV_LEN) ?
-				 "+" : ""));
-		}
+	for (ret = 0; ret < entry->i2c.num; ret++) {
+		dev_dbg(&adap->dev,
+			"master_xfer[%d] %c, addr=0x%02x, len=%d%s\n", ret,
+			(entry->i2c.msgs[ret].flags & I2C_M_RD ? 'R' : 'W'),
+			entry->i2c.msgs[ret].addr, entry->i2c.msgs[ret].len,
+			((entry->i2c.msgs[ret].flags & I2C_M_RECV_LEN) ?
+			 "+" : ""));
+	}
 #endif
-
+	i2c_init_entry(adap, entry);
+	if (adap->algo->master_start)
+		i2c_perform_op_wait(adap, entry);
+	else if (adap->algo->master_xfer) {
 		if (do_lock) {
 			if (in_atomic() || irqs_disabled()) {
 				if (!i2c_trylock_adapter(adap)) {
@@ -2324,9 +2402,11 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	entry->i2c.msgs = msgs;
 	entry->i2c.num = num;
 	entry->complete = NULL;
+	entry->handler = NULL;
 
 	i2c_transfer_entry(adap, entry, true);
 	rv = entry->result;
+	i2c_entry_put(entry);
 	kfree(entry);
 	return rv;
 }
@@ -3081,19 +3161,6 @@ static int i2c_smbus_emu_format(struct i2c_adapter *adapter,
 	return 0;
 }
 
-/**
- * i2c_smbus_xfer - execute SMBus protocol operations
- * @adapter: Handle to I2C bus
- * @addr: Address of SMBus slave on that bus
- * @flags: I2C_CLIENT_* flags (usually zero or I2C_CLIENT_PEC)
- * @read_write: I2C_SMBUS_READ or I2C_SMBUS_WRITE
- * @command: Byte interpreted by slave, for protocols which use such bytes
- * @protocol: SMBus protocol operation to execute, such as I2C_SMBUS_PROC_CALL
- * @data: Data to be read or written
- *
- * This executes an SMBus protocol operation, and returns a negative
- * errno code else zero on success.
- */
 static s32 _i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 		unsigned short flags,
 		char read_write, u8 command, int protocol,
@@ -3128,8 +3195,13 @@ static s32 _i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	entry->smbus.size = protocol;
 	entry->smbus.data = data;
 	entry->complete = NULL;
+	entry->handler = NULL;
+	i2c_init_entry(adapter, entry);
+	entry->result = -EOPNOTSUPP;
 
-	if (algo->smbus_xfer) {
+	if (algo->smbus_start) {
+		i2c_perform_op_wait(adapter, entry);
+	} else if (algo->smbus_xfer) {
 		if (do_lock)
 			i2c_lock_adapter(adapter);
 
@@ -3148,18 +3220,19 @@ static s32 _i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 		}
 		if (do_lock)
 			i2c_unlock_adapter(adapter);
-
-		if (entry->result != -EOPNOTSUPP ||
-					!adapter->algo->master_xfer) {
-			if (entry->complete)
-				entry->complete(adapter, entry);
-			goto trace;
-		}
-		/*
-		 * Fall back to emulation if the adapter doesn't
-		 * implement native support for the SMBus operation.
-		 */
+		if (entry->complete)
+			entry->complete(adapter, entry);
 	}
+
+	if (entry->result != -EOPNOTSUPP ||
+	    (!adapter->algo->master_xfer && !adapter->algo->master_start)) {
+		goto trace;
+	}
+
+	/*
+	 * Fall back to i2c_smbus_xfer_emulated if the adapter doesn't
+	 * implement native support for the SMBus operation.
+	 */
 
 	if (i2c_smbus_emu_format(adapter, entry)) {
 		entry->result = -EINVAL;
@@ -3188,6 +3261,19 @@ trace:
 	return res;
 }
 
+/**
+ * i2c_smbus_xfer - execute SMBus protocol operations
+ * @adapter: Handle to I2C bus
+ * @addr: Address of SMBus slave on that bus
+ * @flags: I2C_CLIENT_* flags (usually zero or I2C_CLIENT_PEC)
+ * @read_write: I2C_SMBUS_READ or I2C_SMBUS_WRITE
+ * @command: Byte interpreted by slave, for protocols which use such bytes
+ * @protocol: SMBus protocol operation to execute, such as I2C_SMBUS_PROC_CALL
+ * @data: Data to be read or written
+ *
+ * This executes an SMBus protocol operation, and returns a negative
+ * errno code else zero on success.
+ */
 s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 		   char read_write, u8 command, int protocol,
 		   union i2c_smbus_data *data)
@@ -3197,6 +3283,21 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 }
 EXPORT_SYMBOL(i2c_smbus_xfer);
 
+/**
+ * i2c_smbus_xfer - execute SMBus protocol operations
+ * @adapter: Handle to I2C bus
+ * @addr: Address of SMBus slave on that bus
+ * @flags: I2C_CLIENT_* flags (usually zero or I2C_CLIENT_PEC)
+ * @read_write: I2C_SMBUS_READ or I2C_SMBUS_WRITE
+ * @command: Byte interpreted by slave, for protocols which use such bytes
+ * @protocol: SMBus protocol operation to execute, such as I2C_SMBUS_PROC_CALL
+ * @data: Data to be read or written
+ *
+ * This executes an SMBus protocol operation, and returns a negative
+ * errno code else zero on success.  It does not call this lock.  This
+ * is for the i2c-mux.c code so it can do i2c operations to set up muxes
+ * while the lock is held.
+ */
 s32 i2c_smbus_xfer_nolock(struct i2c_adapter *adapter, u16 addr,
 		   unsigned short flags,
 		   char read_write, u8 command, int protocol,
@@ -3329,6 +3430,300 @@ int i2c_slave_unregister(struct i2c_client *client)
 }
 EXPORT_SYMBOL_GPL(i2c_slave_unregister);
 #endif
+
+/* ----------------------------------------------------
+ * Entry handling
+ * ----------------------------------------------------
+ */
+
+/*
+ * Get the first entry off the head of the queue and lock it there.
+ * The entry is guaranteed to remain first in the list and the handler
+ * not be called until i2c_entry_put() is called.
+ */
+static struct i2c_op_q_entry *_i2c_entry_get(struct i2c_adapter *adap)
+{
+	struct i2c_op_q_entry *entry = NULL;
+
+	if (!list_empty(adap->q)) {
+		struct list_head *link = adap->q->next;
+
+		entry = list_entry(link, struct i2c_op_q_entry, link);
+	}
+	pr_debug("_i2c_entry_get %p %p\n", entry->adap, entry);
+	return entry;
+}
+
+/*
+ * Return the current entry in operation.
+ */
+struct i2c_op_q_entry *i2c_entry_get(struct i2c_adapter *adap)
+{
+	unsigned long flags;
+	struct i2c_op_q_entry *entry;
+
+	spin_lock_irqsave(adap->q_lock, flags);
+	entry = _i2c_entry_get(adap);
+	if (entry) {
+		if (entry->state != I2C_OP_RUNNING)
+			entry = NULL;
+		else
+			kref_get(&entry->usecount);
+	}
+	spin_unlock_irqrestore(adap->q_lock, flags);
+	return entry;
+}
+EXPORT_SYMBOL(i2c_entry_get);
+
+static int i2c_start_entry(struct i2c_adapter *adap,
+			   struct i2c_op_q_entry *entry)
+{
+	int result;
+
+	/*
+	 * Note: Do not assign to entry->result here.  The operations
+	 * may complete before the function returns (like on qemu with
+	 * immediate results) and it will assign the result incorrectly.
+	 */
+	switch (entry->xfer_type) {
+	case I2C_OP_I2C:
+		result = adap->algo->master_start(adap, entry);
+		break;
+	case I2C_OP_SMBUS:
+		result = adap->algo->smbus_start(adap, entry);
+		break;
+	default:
+		result = -EINVAL;
+	}
+
+	if (result)
+		entry->result = result;
+
+	return result;
+}
+
+static int _i2c_start_next_entry(struct i2c_adapter *adap,
+				 struct i2c_op_q_entry *myentry,
+				 unsigned long *flags)
+{
+	struct i2c_op_q_entry *entry;
+	int ret = 0, result;
+
+next_entry:
+	/* Start the next entry, if there is one and it's not running. */
+	entry = _i2c_entry_get(adap);
+	if (entry) {
+		if (entry->state != I2C_OP_QUEUED) {
+			entry = NULL;
+		} else {
+			i2c_entry_use(entry);
+			entry->state = I2C_OP_RUNNING;
+		}
+	}
+	spin_unlock_irqrestore(adap->q_lock, *flags);
+
+	if (!entry)
+		return ret;
+
+	adap = entry->adap;
+	result = i2c_start_entry(adap, entry);
+	if (result) {
+		/* Undo the use we did above. */
+		i2c_entry_put(entry);
+
+		if (entry == myentry) {
+			ret = result;
+			spin_lock_irqsave(adap->q_lock, *flags);
+			goto next_entry;
+		} else {
+			/* No need for a lock, nothing can be running. */
+			entry->state = I2C_OP_FINISHED;
+			tasklet_schedule(&adap->tasklet);
+		}
+	} else {
+		i2c_start_timer(entry);
+		i2c_entry_put(entry);
+	}
+
+	return ret;
+}
+
+/*
+ * Start the next entry in the queue, adding myentry if it is not
+ * NULL.  If an entry that is processed matches myentry and an error
+ * occurs starting it, don't do the completion, return the error value
+ * instead.
+ */
+static int i2c_start_next_entry(struct i2c_adapter *adap,
+				struct i2c_op_q_entry *myentry)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(adap->q_lock, flags);
+	list_add_tail(&myentry->link, adap->q);
+	return _i2c_start_next_entry(adap, myentry, &flags);
+}
+
+static void i2c_op_release(struct kref *ref)
+{
+	struct i2c_op_q_entry *entry;
+
+	entry = container_of(ref, struct i2c_op_q_entry,
+			     usecount);
+	if (entry->handler)
+		entry->handler(entry);
+}
+
+void i2c_entry_put(struct i2c_op_q_entry *entry)
+{
+	pr_debug("i2c_put %p %p\n", entry->adap, entry);
+	kref_put(&entry->usecount, i2c_op_release);
+}
+EXPORT_SYMBOL(i2c_entry_put);
+
+void i2c_entry_use(struct i2c_op_q_entry *entry)
+{
+	pr_debug("i2c_use %p %p\n", entry->adap, entry);
+	kref_get(&entry->usecount);
+}
+EXPORT_SYMBOL(i2c_entry_use);
+
+static void i2c_finish_list(struct list_head *finished_list)
+{
+	struct i2c_op_q_entry *entry;
+
+	while (!list_empty(finished_list)) {
+		entry = list_entry(finished_list->next, struct i2c_op_q_entry,
+				   link);
+		list_del(&entry->link);
+
+		if (entry->complete)
+			entry->complete(entry->adap, entry);
+
+		/* Finish the operation. */
+		i2c_entry_put(entry);
+	}
+}
+
+static void i2c_op_done_tasklet(unsigned long tdata)
+{
+	struct i2c_adapter *adap = (struct i2c_adapter *) tdata;
+	struct i2c_op_q_entry *entry;
+	unsigned long flags;
+	LIST_HEAD(finished_list);
+
+	spin_lock_irqsave(adap->q_lock, flags);
+restart:
+	entry = _i2c_entry_get(adap);
+	if (entry) {
+		if (entry->state != I2C_OP_FINISHED)
+			entry = NULL;
+	}
+
+	if (!entry)
+		goto out_start_next;
+
+	hrtimer_cancel(adap->timer);
+
+	if (entry->result == -EAGAIN) {
+		/* Retry on arbitration loss, unless we timed out. */
+		entry->tries++;
+		if ((entry->tries <= adap->retries) ||
+				!time_after(jiffies, entry->end_jiffies)) {
+			/* Restart the operation. */
+			entry->result = 0;
+			entry->state = I2C_OP_RUNNING;
+			i2c_entry_use(entry);
+			spin_unlock_irqrestore(adap->q_lock, flags);
+
+			if (!i2c_start_entry(adap, entry)) {
+				i2c_start_timer(entry);
+				i2c_entry_put(entry);
+				/* Don't put again, we aren't done. */
+				goto out_finish;
+			}
+			i2c_entry_put(entry);
+			spin_lock_irqsave(adap->q_lock, flags);
+		}
+	}
+
+	list_del(&entry->link);
+	list_add_tail(&entry->link, &finished_list);
+
+	goto restart;
+
+out_start_next:
+	_i2c_start_next_entry(adap, NULL, &flags);
+out_finish:
+	i2c_finish_list(&finished_list);
+}
+
+void i2c_op_done(struct i2c_op_q_entry *entry)
+{
+	struct i2c_adapter *adap = entry->adap;
+	unsigned long flags;
+
+	pr_debug("i2c_op_done: %p %p\n", adap, entry);
+	spin_lock_irqsave(adap->q_lock, flags);
+	/*
+	 * Guard against multiple calls to "done" for an entry.  This
+	 * can happen, for instance, if a timer poll and an interrupt
+	 * both discover that the operation is finished and both
+	 * report it.
+	 */
+	if (entry->state == I2C_OP_FINISHED) {
+		spin_unlock_irqrestore(adap->q_lock, flags);
+		i2c_entry_put(entry);
+		return;
+	}
+
+	entry->state = I2C_OP_FINISHED;
+	tasklet_schedule(&adap->tasklet);
+
+	spin_unlock_irqrestore(adap->q_lock, flags);
+}
+EXPORT_SYMBOL(i2c_op_done);
+
+void i2c_poll(struct i2c_client *client,
+	      unsigned int ns_since_last_call)
+{
+	struct i2c_adapter *adap = client->adapter;
+	struct i2c_op_q_entry *entry;
+
+	entry = i2c_entry_get(adap);
+	if (entry) {
+		adap = entry->adap;
+		adap->algo->poll(entry->adap, entry, ns_since_last_call);
+		i2c_entry_put(entry);
+	}
+	i2c_op_done_tasklet((unsigned long) adap);
+}
+EXPORT_SYMBOL(i2c_poll);
+
+int i2c_non_blocking_op(struct i2c_client *client,
+			struct i2c_op_q_entry *entry)
+{
+	unsigned long      flags;
+	struct i2c_adapter *adap = client->adapter;
+
+	if (!i2c_non_blocking_capable(adap))
+		return -EOPNOTSUPP;
+
+	entry->smbus.addr = client->addr;
+	entry->smbus.flags = client->flags;
+
+	if (entry->xfer_type == I2C_OP_SMBUS) {
+		if (!adap->algo->smbus_start) {
+			if (i2c_smbus_emu_format(adap, entry))
+				return -EINVAL;
+		}
+	}
+
+	i2c_init_entry(adap, entry);
+
+	return i2c_start_next_entry(adap, entry);
+}
+EXPORT_SYMBOL(i2c_non_blocking_op);
 
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus main module");
