@@ -106,7 +106,8 @@
 #define SMBHSTCNT_KILL		2
 
 /* Other settings */
-#define MAX_RETRIES		400
+#define MAX_TIMEOUT_US		100000
+#define RETRY_TIME_US		500 /* Retry minimum is 500us */
 #define ENABLE_INT9		0	/* set to 0x01 to enable - untested */
 
 /* I801 command constants */
@@ -148,12 +149,31 @@
 #define PCI_DEVICE_ID_INTEL_5_3400_SERIES_SMBUS	0x3b30
 #define PCI_DEVICE_ID_INTEL_LYNXPOINT_SMBUS	0x8c22
 
+enum i801_drv_state {
+	I801_NORMAL = 0,
+	I801_TIMEOUT_RECOVERY,
+	I801_WAIT_INTR
+};
+
+struct i801_i2c_data {
+	int i;
+	int len;
+	unsigned char hostc;
+	int block;
+	int full_block;
+	int hwpec;
+	int xact;
+	int hststs;
+	int finished;
+	enum i801_drv_state state;
+};
 struct i801_priv {
 	struct i2c_adapter adapter;
 	unsigned long smba;
 	unsigned char original_hstcfg;
 	struct pci_dev *pci_dev;
 	unsigned int features;
+	struct i801_i2c_data d;
 };
 
 static struct pci_driver i801_driver;
@@ -206,30 +226,9 @@ static int i801_check_pre(struct i801_priv *priv)
 }
 
 /* Convert the status register to an error code, and clear it. */
-static int i801_check_post(struct i801_priv *priv, int status, int timeout)
+static int i801_check_post(struct i801_priv *priv, int status)
 {
 	int result = 0;
-
-	/* If the SMBus is still busy, we give up */
-	if (timeout) {
-		dev_err(&priv->pci_dev->dev, "Transaction timeout\n");
-		/* try to stop the current command */
-		dev_dbg(&priv->pci_dev->dev, "Terminating the current operation\n");
-		outb_p(inb_p(SMBHSTCNT(priv)) | SMBHSTCNT_KILL,
-		       SMBHSTCNT(priv));
-		usleep_range(1000, 2000);
-		outb_p(inb_p(SMBHSTCNT(priv)) & (~SMBHSTCNT_KILL),
-		       SMBHSTCNT(priv));
-
-		/* Check if it worked */
-		status = inb_p(SMBHSTSTS(priv));
-		if ((status & SMBHSTSTS_HOST_BUSY) ||
-		    !(status & SMBHSTSTS_FAILED))
-			dev_err(&priv->pci_dev->dev,
-				"Failed terminating the transaction\n");
-		outb_p(STATUS_FLAGS, SMBHSTSTS(priv));
-		return -ETIMEDOUT;
-	}
 
 	if (status & SMBHSTSTS_FAILED) {
 		result = -EIO;
@@ -258,168 +257,245 @@ static int i801_check_post(struct i801_priv *priv, int status, int timeout)
 	return result;
 }
 
-static int i801_transaction(struct i801_priv *priv, int xact)
+static void i801_finish(struct i801_priv *priv,
+			struct i2c_op_q_entry *entry)
 {
-	int status;
-	int result;
-	int timeout = 0;
+	priv->d.finished = 1;
 
-	result = i801_check_pre(priv);
+	if (priv->d.block && entry->smbus.size == I2C_SMBUS_I2C_BLOCK_DATA
+	    && entry->smbus.read_write == I2C_SMBUS_WRITE)
+		/* restore saved configuration register value */
+		pci_write_config_byte(priv->pci_dev, SMBHSTCFG, priv->d.hostc);
+
+	/*
+	 * Some BIOSes don't like it when PEC is enabled at reboot or resume
+	 * time, so we forcibly disable it after every transaction. Turn off
+	 * E32B for the same reason.
+	 */
+	if (priv->d.hwpec)
+		outb_p(inb_p(SMBAUXCTL(priv))
+		       & ~(SMBAUXCTL_CRC | SMBAUXCTL_E32B),
+		       SMBAUXCTL(priv));
+
+	if ((priv->d.full_block) &&
+			(entry->smbus.read_write == I2C_SMBUS_READ)) {
+		int i;
+
+		/*
+		 * A full block transfer, make sure to get the length and
+		 * the data.
+		 */
+		priv->d.len = inb_p(SMBHSTDAT0(priv));
+		if (priv->d.len < 1 || priv->d.len > I2C_SMBUS_BLOCK_MAX)
+			entry->result = -EIO;
+		else {
+			entry->smbus.data->block[0] = priv->d.len;
+			for (i = 0; i < priv->d.len; i++)
+				entry->smbus.data->block[i + 1] =
+					inb_p(SMBBLKDAT(priv));
+		}
+	}
+
+	if (priv->d.block ||
+	    ((entry->smbus.read_write == I2C_SMBUS_WRITE)
+	     || (priv->d.xact == I801_QUICK)))
+		return;
+
+	switch (priv->d.xact & 0x7f) {
+	case I801_BYTE:	/* Result put in SMBHSTDAT0 */
+	case I801_BYTE_DATA:
+		entry->smbus.data->byte = inb_p(SMBHSTDAT0(priv));
+		break;
+	case I801_WORD_DATA:
+		entry->smbus.data->word = inb_p(SMBHSTDAT0(priv))
+			+ (inb_p(SMBHSTDAT1(priv)) << 8);
+		break;
+	}
+}
+
+static void i801_timeout_recovery_poll(struct i801_priv *priv,
+				       struct i2c_op_q_entry *entry)
+{
+	outb_p(inb_p(SMBHSTCNT(priv)) & (~SMBHSTCNT_KILL), SMBHSTCNT(priv));
+
+	/* Check if it worked */
+	priv->d.hststs = inb_p(SMBHSTSTS(priv));
+	if ((priv->d.hststs & SMBHSTSTS_HOST_BUSY) ||
+	    !(priv->d.hststs & SMBHSTSTS_FAILED))
+		dev_err(&priv->pci_dev->dev,
+			"Failed terminating the transaction\n");
+	outb_p(STATUS_FLAGS, SMBHSTSTS(priv));
+
+	entry->result = -ETIMEDOUT;
+	priv->d.state = I801_NORMAL;
+	i801_finish(priv, entry);
+}
+
+static void i801_start_timeout_recovery(struct i801_priv *priv,
+					struct i2c_op_q_entry *entry)
+{
+	dev_err(&priv->pci_dev->dev, "Transaction timeout\n");
+	/* try to stop the current command */
+	dev_dbg(&priv->pci_dev->dev, "Terminating the current operation\n");
+	outb_p(inb_p(SMBHSTCNT(priv)) | SMBHSTCNT_KILL, SMBHSTCNT(priv));
+	priv->d.state = I801_TIMEOUT_RECOVERY;
+}
+
+static void i801_block_poll_wait_intr(struct i801_priv *priv,
+				      struct i2c_op_q_entry *entry)
+{
+	/* wait for INTR bit as advised by Intel */
+	priv->d.hststs = inb_p(SMBHSTSTS(priv));
+	if (priv->d.hststs & SMBHSTSTS_INTR) {
+		priv->d.state = I801_NORMAL;
+		outb_p(priv->d.hststs, SMBHSTSTS(priv));
+		i801_finish(priv, entry);
+	} else if (entry->time_left <= 0) {
+		/* Timed out */
+		priv->d.state = I801_NORMAL;
+		outb_p(priv->d.hststs, SMBHSTSTS(priv));
+		entry->result = -EIO;
+		dev_dbg(&priv->pci_dev->dev, "PEC Timeout!\n");
+	}
+}
+
+static void i801_transaction_poll(struct i801_priv *priv,
+				  struct i2c_op_q_entry *entry)
+{
+	priv->d.hststs = inb_p(SMBHSTSTS(priv));
+	if (!(priv->d.hststs & SMBHSTSTS_HOST_BUSY)) {
+		entry->result = i801_check_post(priv, priv->d.hststs);
+		if (priv->d.hwpec) {
+			priv->d.state = I801_WAIT_INTR;
+			entry->time_left = MAX_TIMEOUT_US;
+			i801_block_poll_wait_intr(priv, entry);
+		} else
+			i801_finish(priv, entry);
+	} else if (entry->time_left <= 0)
+		i801_start_timeout_recovery(priv, entry);
+}
+
+static int i801_transaction_start(struct i801_priv *priv,
+				  struct i2c_op_q_entry *entry)
+{
+	int result = i801_check_pre(priv);
 	if (result < 0)
 		return result;
 
-	/* the current contents of SMBHSTCNT can be overwritten, since PEC,
-	 * INTREN, SMBSCMD are passed in xact */
-	outb_p(xact | I801_START, SMBHSTCNT(priv));
-
-	/* We will always wait for a fraction of a second! */
-	do {
-		usleep_range(250, 500);
-		status = inb_p(SMBHSTSTS(priv));
-	} while ((status & SMBHSTSTS_HOST_BUSY) && (timeout++ < MAX_RETRIES));
-
-	result = i801_check_post(priv, status, timeout > MAX_RETRIES);
-	if (result < 0)
-		return result;
-
-	outb_p(SMBHSTSTS_INTR, SMBHSTSTS(priv));
+	outb_p(priv->d.xact | I801_START, SMBHSTCNT(priv));
 	return 0;
 }
 
-/* wait for INTR bit as advised by Intel */
-static void i801_wait_hwpec(struct i801_priv *priv)
+static int i801_full_block(struct i801_priv *priv,
+			   struct i2c_op_q_entry *entry)
 {
-	int timeout = 0;
-	int status;
+	int i;
 
-	do {
-		usleep_range(250, 500);
-		status = inb_p(SMBHSTSTS(priv));
-	} while ((!(status & SMBHSTSTS_INTR))
-		 && (timeout++ < MAX_RETRIES));
-
-	if (timeout > MAX_RETRIES)
-		dev_dbg(&priv->pci_dev->dev, "PEC Timeout!\n");
-
-	outb_p(status, SMBHSTSTS(priv));
-}
-
-static int i801_block_transaction_by_block(struct i801_priv *priv,
-					   union i2c_smbus_data *data,
-					   char read_write, int hwpec)
-{
-	int i, len;
-	int status;
-
+	priv->d.full_block = 1;
 	inb_p(SMBHSTCNT(priv)); /* reset the data buffer index */
 
 	/* Use 32-byte buffer to process this transaction */
-	if (read_write == I2C_SMBUS_WRITE) {
-		len = data->block[0];
-		outb_p(len, SMBHSTDAT0(priv));
-		for (i = 0; i < len; i++)
-			outb_p(data->block[i+1], SMBBLKDAT(priv));
+	if (entry->smbus.read_write == I2C_SMBUS_WRITE) {
+		outb_p(priv->d.len, SMBHSTDAT0(priv));
+		for (i = 0; i < priv->d.len; i++)
+			outb_p(entry->smbus.data->block[i + 1],
+			       SMBBLKDAT(priv));
 	}
 
-	status = i801_transaction(priv, I801_BLOCK_DATA | ENABLE_INT9 |
-				  I801_PEC_EN * hwpec);
+	priv->d.xact = I801_BLOCK_DATA | ENABLE_INT9;
+	if (priv->d.hwpec)
+		priv->d.xact |= I801_PEC_EN;
+
+	return i801_transaction_start(priv, entry);
+}
+
+static int i801_block_next_byte(struct i801_priv *priv,
+				struct i2c_op_q_entry *entry)
+{
+	int smbcmd;
+	int status;
+
+	if (priv->d.i > priv->d.len) {
+		if (priv->d.hwpec) {
+			priv->d.state = I801_WAIT_INTR;
+			entry->time_left = MAX_TIMEOUT_US;
+			i801_block_poll_wait_intr(priv, entry);
+		} else
+			i801_finish(priv, entry);
+		return 0;
+	}
+
+	if (priv->d.i == priv->d.len &&
+				entry->smbus.read_write == I2C_SMBUS_READ) {
+		if (entry->smbus.command == I2C_SMBUS_I2C_BLOCK_DATA)
+			smbcmd = I801_I2C_BLOCK_LAST;
+		else
+			smbcmd = I801_BLOCK_LAST;
+	} else {
+		if (entry->smbus.command == I2C_SMBUS_I2C_BLOCK_DATA
+		    && entry->smbus.read_write == I2C_SMBUS_READ)
+			smbcmd = I801_I2C_BLOCK_DATA;
+		else
+			smbcmd = I801_BLOCK_DATA;
+	}
+	outb_p(smbcmd | ENABLE_INT9, SMBHSTCNT(priv));
+
+	/* Make sure the SMBus host is ready to start transmitting */
+	priv->d.hststs = inb_p(SMBHSTSTS(priv));
+	status = i801_check_post(priv, priv->d.hststs);
 	if (status)
 		return status;
 
-	if (read_write == I2C_SMBUS_READ) {
-		len = inb_p(SMBHSTDAT0(priv));
-		if (len < 1 || len > I2C_SMBUS_BLOCK_MAX)
-			return -EPROTO;
-
-		data->block[0] = len;
-		for (i = 0; i < len; i++)
-			data->block[i + 1] = inb_p(SMBBLKDAT(priv));
-	}
+	if (priv->d.i == 1)
+		outb_p(priv->d.hststs | I801_START, SMBHSTCNT(priv));
 	return 0;
 }
 
-static int i801_block_transaction_byte_by_byte(struct i801_priv *priv,
-					       union i2c_smbus_data *data,
-					       char read_write, int command,
-					       int hwpec)
+/* Called on timer ticks.  This checks the result of the
+   transaction. */
+static void i801_block_poll(struct i801_priv *priv,
+			    struct i2c_op_q_entry *entry)
 {
-	int i, len;
-	int smbcmd;
 	int status;
-	int result;
-	int timeout;
 
-	result = i801_check_pre(priv);
-	if (result < 0)
-		return result;
-
-	len = data->block[0];
-
-	if (read_write == I2C_SMBUS_WRITE) {
-		outb_p(len, SMBHSTDAT0(priv));
-		outb_p(data->block[1], SMBBLKDAT(priv));
+	priv->d.hststs = inb_p(SMBHSTSTS(priv));
+	if (!(priv->d.hststs & SMBHSTSTS_BYTE_DONE)) {
+		/* Not ready yet */
+		if (entry->time_left <= 0)
+			i801_start_timeout_recovery(priv, entry);
+		return;
 	}
 
-	for (i = 1; i <= len; i++) {
-		if (i == len && read_write == I2C_SMBUS_READ) {
-			if (command == I2C_SMBUS_I2C_BLOCK_DATA)
-				smbcmd = I801_I2C_BLOCK_LAST;
-			else
-				smbcmd = I801_BLOCK_LAST;
-		} else {
-			if (command == I2C_SMBUS_I2C_BLOCK_DATA
-			 && read_write == I2C_SMBUS_READ)
-				smbcmd = I801_I2C_BLOCK_DATA;
-			else
-				smbcmd = I801_BLOCK_DATA;
-		}
-		outb_p(smbcmd | ENABLE_INT9, SMBHSTCNT(priv));
-
-		if (i == 1)
-			outb_p(inb(SMBHSTCNT(priv)) | I801_START,
-			       SMBHSTCNT(priv));
-
-		/* We will always wait for a fraction of a second! */
-		timeout = 0;
-		do {
-			usleep_range(250, 500);
-			status = inb_p(SMBHSTSTS(priv));
-		} while ((!(status & SMBHSTSTS_BYTE_DONE))
-			 && (timeout++ < MAX_RETRIES));
-
-		result = i801_check_post(priv, status, timeout > MAX_RETRIES);
-		if (result < 0)
-			return result;
-
-		if (i == 1 && read_write == I2C_SMBUS_READ
-		 && command != I2C_SMBUS_I2C_BLOCK_DATA) {
-			len = inb_p(SMBHSTDAT0(priv));
-			if (len < 1 || len > I2C_SMBUS_BLOCK_MAX) {
-				dev_err(&priv->pci_dev->dev,
-					"Illegal SMBus block read size %d\n",
-					len);
-				/* Recover */
-				while (inb_p(SMBHSTSTS(priv)) &
-				       SMBHSTSTS_HOST_BUSY)
-					outb_p(SMBHSTSTS_BYTE_DONE,
-					       SMBHSTSTS(priv));
-				outb_p(SMBHSTSTS_INTR, SMBHSTSTS(priv));
-				return -EPROTO;
-			}
-			data->block[0] = len;
-		}
-
-		/* Retrieve/store value in SMBBLKDAT */
-		if (read_write == I2C_SMBUS_READ)
-			data->block[i] = inb_p(SMBBLKDAT(priv));
-		if (read_write == I2C_SMBUS_WRITE && i+1 <= len)
-			outb_p(data->block[i+1], SMBBLKDAT(priv));
-
-		/* signals SMBBLKDAT ready */
-		outb_p(SMBHSTSTS_BYTE_DONE | SMBHSTSTS_INTR, SMBHSTSTS(priv));
+	status = i801_check_post(priv, priv->d.hststs);
+	if (status) {
+		entry->result = status;
+		return;
 	}
 
-	return 0;
+	if (priv->d.i == 1 && entry->smbus.read_write == I2C_SMBUS_READ
+	    && entry->smbus.command != I2C_SMBUS_I2C_BLOCK_DATA) {
+		/* When reading, the first byte is the length. */
+		priv->d.len = inb_p(SMBHSTDAT0(priv));
+		if ((priv->d.len < 1) || (priv->d.len > 32)) {
+			entry->result = -EPROTO;
+			return;
+		} else
+			entry->smbus.data->block[0] = priv->d.len;
+	}
+
+	/* Retrieve/store value in SMBBLKDAT */
+	if (entry->smbus.read_write == I2C_SMBUS_READ)
+		entry->smbus.data->block[priv->d.i] = inb_p(SMBBLKDAT(priv));
+	if (entry->smbus.read_write == I2C_SMBUS_WRITE &&
+				 priv->d.i + 1 <= priv->d.len)
+		outb_p(entry->smbus.data->block[priv->d.i + 1],
+		       SMBBLKDAT(priv));
+
+	/* signals SMBBLKDAT ready */
+	outb_p(SMBHSTSTS_BYTE_DONE | SMBHSTSTS_INTR, SMBHSTSTS(priv));
+
+	(priv->d.i)++;
+	entry->result = i801_block_next_byte(priv, entry);
 }
 
 static int i801_set_block_buffer_mode(struct i801_priv *priv)
@@ -430,20 +506,16 @@ static int i801_set_block_buffer_mode(struct i801_priv *priv)
 	return 0;
 }
 
-/* Block transaction function */
-static int i801_block_transaction(struct i801_priv *priv,
-				  union i2c_smbus_data *data, char read_write,
-				  int command, int hwpec)
+static int i801_block_start(struct i801_priv *priv,
+			    struct i2c_op_q_entry *entry)
 {
-	int result = 0;
-	unsigned char hostc;
-
-	if (command == I2C_SMBUS_I2C_BLOCK_DATA) {
-		if (read_write == I2C_SMBUS_WRITE) {
+	if (entry->smbus.size == I2C_SMBUS_I2C_BLOCK_DATA) {
+		if (entry->smbus.read_write == I2C_SMBUS_WRITE) {
 			/* set I2C_EN bit in configuration register */
-			pci_read_config_byte(priv->pci_dev, SMBHSTCFG, &hostc);
+			pci_read_config_byte(priv->pci_dev,
+					     SMBHSTCFG, &priv->d.hostc);
 			pci_write_config_byte(priv->pci_dev, SMBHSTCFG,
-					      hostc | SMBHSTCFG_I2C_EN);
+					      priv->d.hostc | SMBHSTCFG_I2C_EN);
 		} else if (!(priv->features & FEATURE_I2C_BLOCK_READ)) {
 			dev_err(&priv->pci_dev->dev,
 				"I2C block read is unsupported!\n");
@@ -451,146 +523,190 @@ static int i801_block_transaction(struct i801_priv *priv,
 		}
 	}
 
-	if (read_write == I2C_SMBUS_WRITE
-	 || command == I2C_SMBUS_I2C_BLOCK_DATA) {
-		if (data->block[0] < 1)
-			data->block[0] = 1;
-		if (data->block[0] > I2C_SMBUS_BLOCK_MAX)
-			data->block[0] = I2C_SMBUS_BLOCK_MAX;
-	} else {
-		data->block[0] = 32;	/* max for SMBus block reads */
-	}
+	if (entry->smbus.read_write == I2C_SMBUS_WRITE
+	    || entry->smbus.command == I2C_SMBUS_I2C_BLOCK_DATA) {
+		priv->d.len = entry->smbus.data->block[0];
+		if (priv->d.len < 1)
+			priv->d.len = 1;
+		if (priv->d.len > I2C_SMBUS_BLOCK_MAX)
+			priv->d.len = I2C_SMBUS_BLOCK_MAX;
+	} else
+		priv->d.len = 32;	/* max for SMBus block reads */
 
 	/* Experience has shown that the block buffer can only be used for
 	   SMBus (not I2C) block transactions, even though the datasheet
 	   doesn't mention this limitation. */
 	if ((priv->features & FEATURE_BLOCK_BUFFER)
-	 && command != I2C_SMBUS_I2C_BLOCK_DATA
-	 && i801_set_block_buffer_mode(priv) == 0)
-		result = i801_block_transaction_by_block(priv, data,
-							 read_write, hwpec);
-	else
-		result = i801_block_transaction_byte_by_byte(priv, data,
-							     read_write,
-							     command, hwpec);
-
-	if (result == 0 && hwpec)
-		i801_wait_hwpec(priv);
-
-	if (command == I2C_SMBUS_I2C_BLOCK_DATA
-	 && read_write == I2C_SMBUS_WRITE) {
-		/* restore saved configuration register value */
-		pci_write_config_byte(priv->pci_dev, SMBHSTCFG, hostc);
+	    && entry->smbus.command != I2C_SMBUS_I2C_BLOCK_DATA
+	    && i801_set_block_buffer_mode(priv) == 0)
+		return i801_full_block(priv, entry);
+	else {
+		priv->d.i = 1;
+		if (entry->smbus.read_write == I2C_SMBUS_WRITE) {
+			outb_p(priv->d.len, SMBHSTDAT0(priv));
+			outb_p(entry->smbus.data->block[1], SMBBLKDAT(priv));
+		}
+		return i801_block_next_byte(priv, entry);
 	}
-	return result;
 }
 
-/* Return negative errno on error. */
-static s32 i801_access(struct i2c_adapter *adap, u16 addr,
-		       unsigned short flags, char read_write, u8 command,
-		       int size, union i2c_smbus_data *data)
+/* General poll routine.  Called periodically by the i2c code. */
+static void i801_poll(struct i2c_adapter *adapter,
+		      struct i2c_op_q_entry *entry,
+		      unsigned int us_since_last_poll)
 {
-	int hwpec;
-	int block = 0;
-	int ret, xact = 0;
+	struct i801_priv *priv = i2c_get_adapdata(adapter);
+
+	dev_dbg(&priv->pci_dev->dev, "Poll call for %p %p at %ld\n",
+		priv, entry, jiffies);
+
+	if (!entry->data)
+		/* The entry hasn't been started yet. */
+		return;
+
+	if (priv->d.finished) {
+		/* We delay an extra poll to keep the hardware happy.
+		   Otherwise the hardware is not ready when we start
+		   the next operation. */
+		i2c_op_done(&priv->adapter, entry);
+		return;
+	}
+
+	/* Decrement timeout */
+	entry->time_left -= us_since_last_poll;
+
+	/* Wait a jiffie normally. */
+	entry->call_again_us = RETRY_TIME_US;
+
+	if (priv->d.state == I801_TIMEOUT_RECOVERY)
+		i801_timeout_recovery_poll(priv, entry);
+	else if (priv->d.block && !priv->d.full_block) {
+		if (priv->d.state == I801_WAIT_INTR)
+			i801_block_poll_wait_intr(priv, entry);
+		else
+			i801_block_poll(priv, entry);
+		if (entry->result < 0)
+			/* Error, finish the transaction */
+			i801_finish(priv, entry);
+	} else {
+		i801_transaction_poll(priv, entry);
+		if (entry->result < 0)
+			/* Error, finish the transaction */
+			i801_finish(priv, entry);
+	}
+}
+
+/* Start a general SMBUS transaction on the i801.  Figure out what
+   kind of transaction it is, set it up, and start it. */
+static int i801_start(struct i2c_adapter *adap,
+		      struct i2c_op_q_entry *entry)
+{
 	struct i801_priv *priv = i2c_get_adapdata(adap);
+	int ret;
+	unsigned char host_addr;
 
-	hwpec = (priv->features & FEATURE_SMBUS_PEC) && (flags & I2C_CLIENT_PEC)
-		&& size != I2C_SMBUS_QUICK
-		&& size != I2C_SMBUS_I2C_BLOCK_DATA;
+	dev_dbg(&priv->pci_dev->dev, "start call for %p %p at %ld\n",
+		adap, entry, jiffies);
 
-	switch (size) {
+	priv->d.block = 0;
+	priv->d.full_block = 0;
+	priv->d.hwpec = 0;
+	priv->d.xact = 0;
+	priv->d.state = 0;
+	priv->d.finished = 0;
+
+	priv->d.hwpec = (priv->features & FEATURE_SMBUS_PEC)
+		&& (entry->smbus.flags & I2C_CLIENT_PEC)
+		&& entry->smbus.size != I2C_SMBUS_QUICK
+		&& entry->smbus.size != I2C_SMBUS_I2C_BLOCK_DATA;
+
+	entry->data = &priv->d; /* Mark it started */
+
+	host_addr = (((entry->smbus.addr & 0x7f) << 1)
+		     | (entry->smbus.read_write & 0x01));
+
+	switch (entry->smbus.size) {
 	case I2C_SMBUS_QUICK:
-		outb_p(((addr & 0x7f) << 1) | (read_write & 0x01),
-		       SMBHSTADD(priv));
-		xact = I801_QUICK;
+		outb_p(host_addr, SMBHSTADD(priv));
+		priv->d.xact = I801_QUICK;
 		break;
 	case I2C_SMBUS_BYTE:
-		outb_p(((addr & 0x7f) << 1) | (read_write & 0x01),
-		       SMBHSTADD(priv));
-		if (read_write == I2C_SMBUS_WRITE)
-			outb_p(command, SMBHSTCMD(priv));
-		xact = I801_BYTE;
+		outb_p(host_addr, SMBHSTADD(priv));
+		if (entry->smbus.read_write == I2C_SMBUS_WRITE)
+			outb_p(entry->smbus.command, SMBHSTCMD(priv));
+		priv->d.xact = I801_BYTE;
 		break;
 	case I2C_SMBUS_BYTE_DATA:
-		outb_p(((addr & 0x7f) << 1) | (read_write & 0x01),
-		       SMBHSTADD(priv));
-		outb_p(command, SMBHSTCMD(priv));
-		if (read_write == I2C_SMBUS_WRITE)
-			outb_p(data->byte, SMBHSTDAT0(priv));
-		xact = I801_BYTE_DATA;
+		outb_p(host_addr, SMBHSTADD(priv));
+		outb_p(entry->smbus.command, SMBHSTCMD(priv));
+		if (entry->smbus.read_write == I2C_SMBUS_WRITE)
+			outb_p(entry->smbus.data->byte, SMBHSTDAT0(priv));
+		priv->d.xact = I801_BYTE_DATA;
 		break;
 	case I2C_SMBUS_WORD_DATA:
-		outb_p(((addr & 0x7f) << 1) | (read_write & 0x01),
-		       SMBHSTADD(priv));
-		outb_p(command, SMBHSTCMD(priv));
-		if (read_write == I2C_SMBUS_WRITE) {
-			outb_p(data->word & 0xff, SMBHSTDAT0(priv));
-			outb_p((data->word & 0xff00) >> 8, SMBHSTDAT1(priv));
+		outb_p(host_addr, SMBHSTADD(priv));
+		outb_p(entry->smbus.command, SMBHSTCMD(priv));
+		if (entry->smbus.read_write == I2C_SMBUS_WRITE) {
+			outb_p(entry->smbus.data->word & 0xff,
+			       SMBHSTDAT0(priv));
+			outb_p((entry->smbus.data->word & 0xff00) >> 8,
+			       SMBHSTDAT1(priv));
 		}
-		xact = I801_WORD_DATA;
+		priv->d.xact = I801_WORD_DATA;
 		break;
 	case I2C_SMBUS_BLOCK_DATA:
-		outb_p(((addr & 0x7f) << 1) | (read_write & 0x01),
-		       SMBHSTADD(priv));
-		outb_p(command, SMBHSTCMD(priv));
-		block = 1;
+		outb_p(host_addr, SMBHSTADD(priv));
+		outb_p(entry->smbus.command, SMBHSTCMD(priv));
+		priv->d.block = 1;
 		break;
 	case I2C_SMBUS_I2C_BLOCK_DATA:
 		/* NB: page 240 of ICH5 datasheet shows that the R/#W
 		 * bit should be cleared here, even when reading */
-		outb_p((addr & 0x7f) << 1, SMBHSTADD(priv));
-		if (read_write == I2C_SMBUS_READ) {
+		outb_p((host_addr & 0x7f) << 1, SMBHSTADD(priv));
+		if (entry->smbus.read_write == I2C_SMBUS_READ) {
 			/* NB: page 240 of ICH5 datasheet also shows
 			 * that DATA1 is the cmd field when reading */
-			outb_p(command, SMBHSTDAT1(priv));
+			outb_p(entry->smbus.command, SMBHSTDAT1(priv));
 		} else
-			outb_p(command, SMBHSTCMD(priv));
-		block = 1;
+			outb_p(entry->smbus.command, SMBHSTCMD(priv));
+		priv->d.block = 1;
 		break;
 	default:
 		dev_err(&priv->pci_dev->dev, "Unsupported transaction %d\n",
-			size);
+			entry->smbus.size);
 		return -EOPNOTSUPP;
 	}
 
-	if (hwpec)	/* enable/disable hardware PEC */
+	if (priv->d.hwpec)	/* enable/disable hardware PEC */
 		outb_p(inb_p(SMBAUXCTL(priv)) | SMBAUXCTL_CRC, SMBAUXCTL(priv));
 	else
 		outb_p(inb_p(SMBAUXCTL(priv)) & (~SMBAUXCTL_CRC),
 		       SMBAUXCTL(priv));
 
-	if (block)
-		ret = i801_block_transaction(priv, data, read_write, size,
-					     hwpec);
-	else
-		ret = i801_transaction(priv, xact | ENABLE_INT9);
-
-	/* Some BIOSes don't like it when PEC is enabled at reboot or resume
-	   time, so we forcibly disable it after every transaction. Turn off
-	   E32B for the same reason. */
-	if (hwpec || block)
-		outb_p(inb_p(SMBAUXCTL(priv)) &
-		       ~(SMBAUXCTL_CRC | SMBAUXCTL_E32B), SMBAUXCTL(priv));
-
-	if (block)
-		return ret;
-	if (ret)
-		return ret;
-	if ((read_write == I2C_SMBUS_WRITE) || (xact == I801_QUICK))
-		return 0;
-
-	switch (xact & 0x7f) {
-	case I801_BYTE:	/* Result put in SMBHSTDAT0 */
-	case I801_BYTE_DATA:
-		data->byte = inb_p(SMBHSTDAT0(priv));
-		break;
-	case I801_WORD_DATA:
-		data->word = inb_p(SMBHSTDAT0(priv)) +
-			     (inb_p(SMBHSTDAT1(priv)) << 8);
-		break;
+	if (priv->d.block) {
+		ret = i801_block_start(priv, entry);
+		if (ret)
+			/* Error, finish the transaction */
+			i801_finish(priv, entry);
+	} else {
+		priv->d.xact |= ENABLE_INT9;
+		ret = i801_transaction_start(priv, entry);
+		if (ret)
+			/* Error, finish the transaction */
+			i801_finish(priv, entry);
 	}
-	return 0;
+
+	/* Wait extra long here, we want at least 2 ticks to guarantee
+	   we wait >= 1 tick.  But we want to wait at least 100us no
+	   matter what. */
+#if ((1000000 / HZ) < 100)
+	entry->call_again_us = 200;
+#else
+	entry->call_again_us = (1000000 / HZ) * 2;
+#endif
+	entry->time_left = MAX_TIMEOUT_US;
+
+	return ret;
 }
 
 
@@ -607,7 +723,8 @@ static u32 i801_func(struct i2c_adapter *adapter)
 }
 
 static const struct i2c_algorithm smbus_algorithm = {
-	.smbus_xfer	= i801_access,
+	.smbus_start	= i801_start,
+	.poll		= i801_poll,
 	.functionality	= i801_func,
 };
 
