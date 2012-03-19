@@ -29,6 +29,7 @@
 #include <linux/tty.h>
 #include <linux/mutex.h>
 #include <linux/sysrq.h>
+#include <linux/tty_flip.h>
 #include <uapi/linux/serial_core.h>
 
 #ifdef CONFIG_SERIAL_CORE_CONSOLE
@@ -402,6 +403,12 @@ static inline int uart_handle_break(struct uart_port *port)
 	if (port->flags & UPF_SAK)
 		do_SAK(state->port.tty);
 	return 0;
+}
+
+static inline void
+uart_push(struct uart_port *port)
+{
+	tty_flip_buffer_push(&port->state->port);
 }
 
 /*
