@@ -486,13 +486,14 @@ The SMBus Driver
 ----------------
 
 The SMBus driver allows up to 4 SMBus devices to be configured in the
-system.  By default, the driver will register any SMBus interfaces it finds
-in the I2C address range of 0x20 to 0x4f on any adapter.  You can change this
+system.  By default, the driver will only register with something it
+finds in DMI or ACPI tables.  You can change this
 at module load time (for a module) with:
 
   modprobe ipmi_smb.o
 	addr=<adapter1>,<i2caddr1>[,<adapter2>,<i2caddr2>[,...]]
 	dbg=<flags1>,<flags2>...
+        slave_addrs=<addr1>,<addr2>,...
 	[defaultprobe=1] [dbg_probe=1]
 
 The addresses are specified in pairs, the first is the adapter ID and the
@@ -501,20 +502,26 @@ second is the I2C address on that adapter.
 The debug flags are bit flags for each BMC found, they are:
 IPMI messages: 1, driver state: 2, timing: 4, I2C probe: 8
 
-Setting smb_defaultprobe to zero disabled the default probing of SMBus
-interfaces at address range 0x20 to 0x4f.  This means that only the
-BMCs specified on the smb_addr line will be detected.
+Setting defaultprobe to one will enable probing of SMBus interfaces at
+address ranging from 0x20 to 0x4f.  This means any BMCs found in that
+area on any adapter will be detected.  Note that if something else is
+in this address range, the scan operation can clobber it, so be
+careful.
 
-Setting smb_dbg_probe to 1 will enable debugging of the probing and
+Setting dbg_probe to 1 will enable debugging of the probing and
 detection process for BMCs on the SMBusses.
 
-Discovering the IPMI compliant BMC on the SMBus can cause devices
-on the I2C bus to fail. The SMBus driver writes a "Get Device ID" IPMI
+The slave_addrs specifies the IPMI address of the local BMC.  This is
+usually 0x20 and the driver defaults to that, but in case it's not, it
+can be specified when the driver starts up.
+
+Discovering the IPMI compliant BMC on the SMBus can cause devices on
+the I2C bus to fail. The SMBus driver writes a "Get Device ID" IPMI
 message as a block write to the I2C bus and waits for a response.
-This action can be detrimental to some I2C devices. It is highly recommended
-that the known I2c address be given to the SMBus driver in the smb_addr
-parameter. The default address range will not be used when a smb_addr
-parameter is provided.
+This action can be detrimental to some I2C devices. It is highly
+recommended that the known I2C address be given to the SMBus driver in
+the smb_addr parameter unless you have DMI or ACPI data to tell the
+driver what to use.
 
 When compiled into the kernel, the addresses can be specified on the
 kernel command line as:
@@ -522,6 +529,7 @@ kernel command line as:
   ipmb_smb.addr=<adapter1>,<i2caddr1>[,<adapter2>,<i2caddr2>[,...]]
 	ipmi_smb.dbg=<flags1>,<flags2>...
 	ipmi_smb.defaultprobe=0 ipmi_smb.dbg_probe=1
+        ipmi_smb.slave_addrs=<addr1>,<addr2>,...
 
 These are the same options as on the module command line.
 
