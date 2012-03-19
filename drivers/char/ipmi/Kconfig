@@ -75,6 +75,56 @@ config IPMI_SMB
 	 enabled along with this, so the I2C driver knows to run to
 	 completion during sending a panic event.
 
+config IPMI_SERIAL
+       tristate 'IPMI Serial Interface'
+       depends on SERIAL_CORE
+       help
+	System Interface handler to support serial interface
+	to the BMC.  Unless your device has a serial interface to the BMC
+	you should probably say "n" here.
+
+config SERIAL_IPMI_SETUP
+	string 'Default serial IPMI interface setup'
+	depends on IPMI_SERIAL
+	default ""
+	help
+	 Set the default Serial interface parameters in the format:
+	 port,<baud><parity><bits><flow>,<codec_name>,<codec_parms
+	 For example: ttyS1,38400n8,TerminalMode,pp
+	 This value can be over written in the kernel command line with
+	 ipmi_serial.port_info=... or as a module parameter.
+
+config IPMI_SERIAL_TERMINAL_MODE
+	tristate 'Terminal mode interface for IPMI'
+	depends on IPMI_SERIAL
+	default n
+	help
+	  Enable the terminal mode codec for IPMI serial.  This implements
+	  the terminal mode serial interface as described in the IPMI
+	  specification.  This codec takes one option: "pp" (or "nopp")
+	  to force enabling (or not enabling) PigeonPoint-specific
+	  handling of echo.  Some boards are auto-detected for this, but
+	  if you have a PigeonPoint controller and it's not autodetected,
+	  you can force it on.
+
+config IPMI_SERIAL_DIRECT
+	tristate 'Direct mode interface for IPMI'
+	depends on IPMI_SERIAL
+	default n
+	help
+	  Enable the direct mode codec for IPMI serial.  This implements
+	  the direct mode serial interface as described in the IPMI
+	  specification.
+
+config IPMI_SERIAL_RADISYS_ASCII
+	tristate 'Radisys ASCII interface for IPMI'
+	depends on IPMI_SERIAL
+	default n
+	help
+	  Enable the Radisys ASCII codec for IPMI serial.  This
+	  implements a codec for serial interfaces for some Radisys
+	  ATCA cards.
+
 config IPMI_WATCHDOG
        tristate 'IPMI Watchdog Timer'
        help
