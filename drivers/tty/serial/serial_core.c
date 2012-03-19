@@ -1,3 +1,4 @@
+
 /*
  *  Driver core for serial ports
  *
@@ -475,18 +476,25 @@ static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
 static inline int __uart_put_char(struct uart_port *port,
 				struct circ_buf *circ, unsigned char c)
 {
+	if (uart_circ_chars_free(circ) != 0) {
+		circ->buf[circ->head] = c;
+		circ->head = (circ->head + 1) & (UART_XMIT_SIZE - 1);
+		return 1;
+	}
+	return 0;
+}
+
+static inline int
+_uart_put_char(struct uart_port *port, struct circ_buf *circ, unsigned char c)
+{
 	unsigned long flags;
-	int ret = 0;
+	int ret;
 
 	if (!circ->buf)
 		return 0;
 
 	spin_lock_irqsave(&port->lock, flags);
-	if (uart_circ_chars_free(circ) != 0) {
-		circ->buf[circ->head] = c;
-		circ->head = (circ->head + 1) & (UART_XMIT_SIZE - 1);
-		ret = 1;
-	}
+	ret = __uart_put_char(port, circ, c);
 	spin_unlock_irqrestore(&port->lock, flags);
 	return ret;
 }
@@ -495,7 +503,7 @@ static int uart_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct uart_state *state = tty->driver_data;
 
-	return __uart_put_char(state->uart_port, &state->xmit, ch);
+	return _uart_put_char(state->uart_port, &state->xmit, ch);
 }
 
 static void uart_flush_chars(struct tty_struct *tty)
@@ -1901,6 +1909,173 @@ uart_set_options(struct uart_port *port, struct console *co,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(uart_set_options);
+
+static void uartdrv_console_write(struct console *co, const char *s,
+				  unsigned count)
+{
+	struct uart_driver *drv = co->data;
+	struct uart_port *port = drv->pollable_ports[co->index];
+	unsigned long flags, pstate;
+	struct circ_buf *circ;
+	int rv;
+	int locked = 1;
+	int tmout;
+	int free;
+
+	touch_nmi_watchdog();
+
+	if (count == 0)
+		return;
+
+	if (port->sysrq || oops_in_progress)
+		locked = spin_trylock_irqsave(&port->lock, flags);
+	else
+		spin_lock_irqsave(&port->lock, flags);
+
+	circ = &port->state->xmit;
+
+	rv = port->ops->poll_startup(port, &pstate);
+	if (rv)
+		goto out_err;
+
+	tmout = 10000;
+	while (count > 0) {
+		port->ops->poll(port, UART_POLL_FLAGS_TX);
+
+		free = uart_circ_chars_free(circ);
+
+		if (free) {
+			if (*s == '\n') {
+				if (free < 2)
+					goto do_timer;
+				__uart_put_char(port, circ, '\r');
+				free--;
+			}
+			__uart_put_char(port, circ, *s);
+			tmout = 10000;
+			count--;
+			free--;
+			s++;
+			continue;
+		}
+
+do_timer:
+		if (--tmout > 0) {
+			udelay(1);
+			continue;
+		}
+
+		if (port->ops->in_flow_control &&
+					(port->flags & UPF_CONS_FLOW)) {
+			/* Wait up to 1s for flow control. */
+			tmout = 1000000;
+			while (port->ops->in_flow_control(port)) {
+				if (--tmout == 0)
+					break;
+				udelay(1);
+				touch_nmi_watchdog();
+			}
+		}
+
+		port->ops->poll(port, UART_POLL_FLAGS_TX);
+		if (uart_circ_chars_free(circ) == 0) {
+			/*
+			 * We have timed out this character,
+			 * just go on.
+			 */
+			s++;
+			count--;
+		}
+		tmout = 10000;
+	}
+
+	/*
+	 * All the characters are in the buffer, wait for transmit to
+	 * finish.
+	 */
+
+	tmout = 10000;
+	free = uart_circ_chars_free(circ);
+	while ((free > 0) || !port->ops->tx_empty(port)) {
+		port->ops->poll(port, UART_POLL_FLAGS_TX);
+
+		if (free != uart_circ_chars_free(circ)) {
+			tmout = 10000;
+			free = uart_circ_chars_free(circ);
+			continue;
+		}
+		if (--tmout == 0)
+			break;
+		udelay(1);
+	}
+
+	port->ops->poll_shutdown(port, pstate);
+
+ out_err:
+
+	if (locked)
+		spin_unlock_irqrestore(&port->lock, flags);
+
+	/*
+	 * If the port is running something else, we may have opened
+	 * up some transmit space for it while writing the console, so
+	 * tell it that it may be able to write now.
+	 *
+	 * Note that this won't work with a direct serial driver, but
+	 * you shouldn't be running a console on the same port as a
+	 * direct serial driver, anyway.
+	 */
+	if (port->state && (port->state->port.flags & ASYNC_INITIALIZED))
+		uart_write_wakeup(port);
+}
+
+static char console_buffer[UART_XMIT_SIZE];
+static struct uart_state console_state;
+
+static int uartdrv_console_setup(struct console *co, char *options)
+{
+	struct uart_port *port;
+	struct uart_state *state;
+	struct uart_driver *drv = co->data;
+	int baud = 9600;
+	int bits = 8;
+	int parity = 'n';
+	int flow = 'n';
+	int rv;
+
+	/*
+	 * Check whether an invalid uart number has been specified, and
+	 * if so, search for the first available port that does have
+	 * console support.
+	 */
+	if (co->index >= drv->nr_pollable)
+		co->index = 0;
+	port = drv->pollable_ports[co->index];
+
+	if (!port || (!port->iobase && !port->membase))
+		return -ENODEV;
+
+	if (port->ops->port_defaults) {
+		rv = port->ops->port_defaults(port, &baud, &parity, &bits,
+					      &flow);
+		if (rv)
+			return rv;
+	}
+
+	if (options)
+		uart_parse_options(options, &baud, &parity, &bits, &flow);
+
+	rv = uart_set_options(port, co, baud, parity, bits, flow);
+	if (rv)
+		return rv;
+
+	state = &console_state;
+	port->state = state;
+	state->xmit.buf = console_buffer;
+	state->usflags |= UART_STATE_BOOT_ALLOCATED;
+	uart_circ_clear(&state->xmit);
+	return 0;
+}
 #endif /* CONFIG_SERIAL_CORE_CONSOLE */
 
 /**
@@ -2308,6 +2483,18 @@ static const struct tty_port_operations uart_port_ops = {
  */
 void uart_register_polled(struct uart_driver *drv)
 {
+#ifdef CONFIG_SERIAL_CORE_CONSOLE
+	if (drv->nr_pollable && drv->cons &&
+					!(drv->cons->flags & CON_ENABLED)) {
+		/* We manage the consoles for this driver. */
+		drv->cons->write = uartdrv_console_write;
+		drv->cons->device = uart_console_device;
+		drv->cons->setup = uartdrv_console_setup;
+		drv->cons->flags = CON_PRINTBUFFER;
+		drv->cons->data = drv;
+		drv->cons->index = -1;
+	}
+#endif
 }
 EXPORT_SYMBOL(uart_register_polled);
 
@@ -2318,6 +2505,10 @@ EXPORT_SYMBOL(uart_register_polled);
  */
 void uart_unregister_polled(struct uart_driver *drv)
 {
+#ifdef CONFIG_SERIAL_CORE_CONSOLE
+	if (drv->nr_pollable && drv->cons)
+		unregister_console(drv->cons);
+#endif
 }
 EXPORT_SYMBOL(uart_unregister_polled);
 
@@ -2636,6 +2827,15 @@ int uart_add_one_port(struct uart_driver *drv, struct uart_port *uport)
 	state->pm_state = UART_PM_STATE_UNDEFINED;
 
 	uport->cons = drv->cons;
+	if (uport->state) {
+		/* A console, copy stuff that we need. */
+		unsigned long flags;
+
+		spin_lock_irqsave(&uport->lock, flags);
+		state->xmit = uport->state->xmit;
+		state->usflags |= uport->state->usflags;
+		spin_unlock_irqrestore(&uport->lock, flags);
+	}
 	uport->state = state;
 
 	/*

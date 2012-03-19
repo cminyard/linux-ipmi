@@ -24,14 +24,43 @@ console support.
 Console Support
 ---------------
 
-The serial core provides a few helper functions.  This includes identifing
-the correct port structure (via uart_get_console) and decoding command line
-arguments (uart_parse_options).
+If the driver provides the poll functions, the serial core will
+provide most of the console handling for it.  Beyond the poll
+routines, the driver must do the following:
 
-There is also a helper function (uart_write_console) which performs a
-character by character write, translating newlines to CRLF sequences.
-Driver writers are recommended to use this function rather than implementing
-their own version.
+  * #define SUPPORT_SYSRQ before including serial_core.h if the
+    console is enabled and CONFIG_MAGIC_SYSRQ is defined.
+
+  * Add the following code (replacing xxx with your driver name):
+
+#ifdef CONFIG_SERIAL_xxx_CONSOLE
+static struct console xxx_console = {
+	.name		= "ttyS"
+};
+#define xxx_CONSOLE	&xxx_console
+#else
+#define xxx_CONSOLE	NULL
+#endif
+
+
+static struct uart_driver xxx_reg
+{
+	.....
+	.cons = xxx_CONSOLE
+}
+
+static int __init xxx_polled_init(void)
+{
+	... Set up the ports to work polled at this point in time.
+
+	uart_register_polled(&xxx_reg);
+
+	return 0;
+}
+console_initcall(xxx_polled_init);
+
+This is the preferred method, as it allows the driver to work polled
+and as a console.
 
 
 Locking
@@ -461,6 +490,20 @@ uart_resume_port()
 uart_add_one_port()
 
 uart_remove_one_port()
+
+uart_register_polled()
+	Register a driver to work as a polled driver and possibly
+	a console (if configured as such).
+
+	Locking: none
+	Interrupts: enabled
+
+uart_unregister_polled()
+	Remove a polled registration.  If the driver was a console,
+	the next console in line will be used.
+
+	Locking: none
+	Interrupts: enabled
 
 Other notes
 -----------
