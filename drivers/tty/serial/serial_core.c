@@ -70,7 +70,8 @@ void uart_write_wakeup(struct uart_port *port)
 	 * closed.  No cookie for you.
 	 */
 	BUG_ON(!state);
-	tty_wakeup(state->port.tty);
+	if (state->usflags & UART_STATE_TTY_REGISTERED)
+		tty_wakeup(state->port.tty);
 }
 
 static void uart_stop(struct tty_struct *tty)
@@ -153,6 +154,7 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 
 		state->xmit.buf = (unsigned char *) page;
 		uart_circ_clear(&state->xmit);
+		state->usflags |= UART_STATE_BOOT_ALLOCATED;
 	}
 
 	retval = uport->ops->startup(uport);
@@ -220,6 +222,9 @@ static int uart_startup(struct tty_struct *tty, struct uart_state *state,
 	} else if (retval > 0)
 		retval = 0;
 
+	if (!retval)
+		state->usflags |= UART_STATE_TTY_REGISTERED;
+
 	return retval;
 }
 
@@ -259,10 +264,13 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 	/*
 	 * Free the transmit buffer page.
 	 */
-	if (state->xmit.buf) {
+	if (state->xmit.buf && !(state->usflags & UART_STATE_BOOT_ALLOCATED)) {
 		free_page((unsigned long)state->xmit.buf);
 		state->xmit.buf = NULL;
+		state->usflags &= ~UART_STATE_BOOT_ALLOCATED;
 	}
+
+	state->usflags &= ~UART_STATE_TTY_REGISTERED;
 }
 
 /**
@@ -2291,6 +2299,29 @@ static const struct tty_port_operations uart_port_ops = {
 };
 
 /**
+ *	uart_register_polled - register a driver to be used as a polled device
+ *	@drv: low level driver structure
+ *
+ *	Register a uart driver with the polled driver interface.  This
+ *	means that things that need polled I/O can use the driver at this
+ *	point.
+ */
+void uart_register_polled(struct uart_driver *drv)
+{
+}
+EXPORT_SYMBOL(uart_register_polled);
+
+/**
+ *	uart_unregister_polled - unregister a driver previously registered
+ *      as a polled device
+ *	@drv: low level driver structure
+ */
+void uart_unregister_polled(struct uart_driver *drv)
+{
+}
+EXPORT_SYMBOL(uart_unregister_polled);
+
+/**
  *	uart_register_driver - register a driver with the uart core layer
  *	@drv: low level driver structure
  *
@@ -2814,6 +2845,9 @@ void uart_insert_char(struct uart_port *port, unsigned int status,
 		 unsigned int overrun, unsigned int ch, unsigned int flag)
 {
 	struct tty_port *tport = &port->state->port;
+
+	if (!tty)
+		return;
 
 	if ((status & port->ignore_status_mask & ~overrun) == 0)
 		if (tty_insert_flip_char(tport, ch, flag) == 0)

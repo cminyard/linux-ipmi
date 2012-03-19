@@ -341,6 +341,52 @@ hardware.
 	Interrupts: caller dependent.
 	This call must not sleep
 
+  poll_startup(port,&rstate)
+	Set up the port to do polling.  The driver should go into a
+	state where it can be polled with the poll() call.  It may store
+	state information in rstate (a long value); that will be passed
+	to the corresponding poll_shutdown call.   The caller
+        must call this before calling the poll routine and this is
+	called with the port lock held and interrupts off.  The caller
+	is not allowed to release the port lock or re-enable
+	interrupts until after poll_shutdown is called.
+	If polling is not implemented, this does not need to be supplied.
+
+  poll_shutdown(port,state)
+	The driver will no longer be polled.  The state information is
+	the same value return in the rstate value of poll_startup.
+	If polling is not implemented, this does not need to be supplied.
+
+  poll(port, flags)
+	Poll the device for data.  This should work much like an
+	interrupt routine, except it should only check the flags
+	passed in, not everything.  The flags are:
+		UART_POLL_FLAGS_RX - poll for received data
+		UART_POLL_FLAGS_TX - poll for transmitted data
+		UART_POLL_FLAGS_MCTRL - poll for modem control
+	The poll routine should do the "normal" thing for received
+	data and modem control.  For transmit data, it should only
+	transmit data from the circ buffer and not do any flow
+	control or whatnot.
+	If polling is not implemented, this does not need to be supplied.
+
+  in_flow_control(port)
+	This should return true if the port is in flow control (CTS
+	is not asserted) and false if not.  This is only called from
+	a poll context.
+	If polling is not implemented, this does not need to be supplied.
+
+  port_default(port,&baud,&parity,&bits,&flow)
+	Return defaults for the console serial port.  This is so firmware
+	console settings can be transferred to the serial driver and it
+	can use the same values as the firmware.  baud and bits are number
+	values.  parity is of of the following characters: 'n', 'o', 'e'.
+	flow should be 'r' to turn on cts/rts flow control, or a space
+	to do nothing.
+	If polling or serial console is not implemented, this does not
+	need to be supplied.  It function is optional, if not supplied the
+	console will default to 9600n81.
+
 Other functions
 ---------------
 

@@ -43,6 +43,10 @@ struct uart_port;
 struct serial_struct;
 struct device;
 
+#define UART_POLL_FLAGS_RX	(1 << 0)	/* Poll Receiver */
+#define UART_POLL_FLAGS_TX	(1 << 1)	/* Poll Transmitter */
+#define UART_POLL_FLAGS_MCTRL	(1 << 2)	/* Poll modem control */
+
 /*
  * This structure describes all the operations that can be done on the
  * physical hardware.  See Documentation/serial/driver for details.
@@ -67,6 +71,47 @@ struct uart_ops {
 	void		(*set_ldisc)(struct uart_port *, int new);
 	void		(*pm)(struct uart_port *, unsigned int state,
 			      unsigned int oldstate);
+
+
+	/*
+	 * Note: Poll routines must be called with the port lock held and
+	 * interrupts off.
+	 */
+
+	/*
+	 * The startup and shutdown routines must be called before
+	 * poll is used and after done calling poll.  You cannot allow
+	 * the driver code to be run by interrupts (or anything else)
+	 * between this.  A state value is returned by the startup
+	 * routine in pstate, you must pass that to the shutdown
+	 * routine.
+	 */
+	int		(*poll_startup)(struct uart_port *,
+					unsigned long *pstate);
+	void		(*poll_shutdown)(struct uart_port *,
+					 unsigned long pstate);
+
+	/*
+	 * Check the serial chip for I/O.  Flags is used to specify
+	 * what to check, see UART_POLL_FLAGS_xxx above.
+	 */
+	void		(*poll)(struct uart_port *, unsigned int flags);
+
+	/*
+	 * Is the port in flow-control (CTS is not asserted).  It is
+	 * optional an may be NULL and is only called if UPF_CONS_FLOW
+	 * is set in port->flags.
+	 */
+	int             (*in_flow_control)(struct uart_port *);
+
+	/*
+	 * Return reasonable settings for the port; it is primarily
+	 * there so firmware can pass console settings for the
+	 * console.
+	 */
+	int		(*port_defaults)(struct uart_port *,
+					 int *baud, int *parity, int *bits,
+					 int *flow);
 
 	/*
 	 * Return a string describing the type of the port
@@ -234,10 +279,15 @@ struct uart_state {
 	enum uart_pm_state	pm_state;
 	struct circ_buf		xmit;
 
+	unsigned int		usflags;
+
 	struct uart_port	*uart_port;
 };
 
 #define UART_XMIT_SIZE	PAGE_SIZE
+
+#define UART_STATE_TTY_REGISTERED 1 /* Devices is register with TTY layer. */
+#define UART_STATE_BOOT_ALLOCATED 2 /* Buffer was allocated by serial core */
 
 
 /* number of characters left in xmit buffer before we ask for more */
@@ -254,6 +304,18 @@ struct uart_driver {
 	int			 minor;
 	int			 nr;
 	struct console		*cons;
+
+	/*
+	 * If nr_pollable is non-zero, then pollable_ports is an array of uart
+	 * ports that can be used for polling.  The serial_core code
+	 * will assume two things:
+	 *   1) The driver has poll capability in the uart_ops.
+	 *   2) The driver wants the serial_core to manage the console
+	 *      pointed to by "cons" above.  It uses the poll capability
+	 *      to do this.
+	 */
+	int			 nr_pollable;
+	struct uart_port	**pollable_ports;
 
 	/*
 	 * these are private; the low level driver should not
@@ -322,6 +384,8 @@ void uart_console_write(struct uart_port *port, const char *s,
 /*
  * Port/driver registration/removal
  */
+void uart_register_polled(struct uart_driver *uart);
+void uart_unregister_polled(struct uart_driver *uart);
 int uart_register_driver(struct uart_driver *uart);
 void uart_unregister_driver(struct uart_driver *uart);
 int uart_add_one_port(struct uart_driver *reg, struct uart_port *port);
@@ -348,6 +412,8 @@ int uart_resume_port(struct uart_driver *reg, struct uart_port *port);
 static inline int uart_tx_stopped(struct uart_port *port)
 {
 	struct tty_struct *tty = port->state->port.tty;
+	if (!tty)
+		return 0;
 	if(tty->stopped || tty->hw_stopped)
 		return 1;
 	return 0;
@@ -410,6 +476,9 @@ static inline int uart_handle_break(struct uart_port *port)
 static inline void
 uart_push(struct uart_port *port)
 {
+	if (!port->state->port.tty)
+		return;
+
 	tty_flip_buffer_push(&port->state->port);
 }
 
