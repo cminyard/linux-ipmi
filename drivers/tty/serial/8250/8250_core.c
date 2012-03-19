@@ -28,9 +28,7 @@
 #include <linux/sysrq.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
-#include <linux/tty.h>
 #include <linux/ratelimit.h>
-#include <linux/tty_flip.h>
 #include <linux/serial_reg.h>
 #include <linux/serial_core.h>
 #include <linux/serial.h>
@@ -1416,7 +1414,7 @@ ignore_char:
 		lsr = serial_in(up, UART_LSR);
 	} while ((lsr & (UART_LSR_DR | UART_LSR_BI)) && (max_count-- > 0));
 	spin_unlock(&port->lock);
-	tty_flip_buffer_push(&port->state->port);
+	uart_push(&up->port);
 	spin_lock(&port->lock);
 	return lsr;
 }
