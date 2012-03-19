@@ -33,6 +33,7 @@
 #include <linux/of.h>		/* for struct device_node */
 #include <linux/swab.h>		/* for swab16 */
 #include <uapi/linux/i2c.h>
+#include <linux/hrtimer.h>
 
 extern struct bus_type i2c_bus_type;
 extern struct device_type i2c_adapter_type;
@@ -121,6 +122,23 @@ extern s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client,
 					  u8 command, u8 length,
 					  const u8 *values);
 #endif /* I2C */
+
+/*
+ * Non-blocking interface.  The user should fill out the public
+ * portions of the entry structure.  All data in the entry structure
+ * should be guaranteed to be available until the handler callback is
+ * called with the entry.
+ */
+extern int i2c_non_blocking_op(struct i2c_client *client,
+			       struct i2c_op_q_entry *entry);
+
+/*
+ * Poll the i2c interface.  This should only be called in a situation
+ * where scheduling and interrupts are off.  You should put the amount
+ * of nanoseconds between calls in ns_since_last_call.
+ */
+extern void i2c_poll(struct i2c_client *client,
+		     unsigned int ns_since_last_call);
 
 /**
  * struct i2c_driver - represent an I2C device driver
@@ -343,6 +361,37 @@ i2c_register_board_info(int busnum, struct i2c_board_info const *info,
 }
 #endif /* I2C_BOARDINFO */
 
+/*
+ * About locking and the non-blocking interface.
+ *
+ * The poll operations are called single-threaded (along with the
+ * xxx_start operations), so if the driver is only polled then there
+ * is no need to do any locking.  If you are using interrupts, then
+ * the timer operations and interrupts can race and you need to lock
+ * appropriately.
+ *
+ * i2c_op_done() can be called multiple times on the same entry (as
+ * long as each one has a get operation).  This handles poll and
+ * interrupt races calling i2c_op_done().  It will do the right thing.
+ */
+
+/*
+ * Called from an non-blocking interface to get the current working
+ * entry.  Returns NULL if there is none.  This is primarily for
+ * interrupt handlers to determine what they should be working on.
+ * Note that if you call i2c_entry_get() and get a non-null entry, you
+ * must call i2c_entry_put() on it.
+ */
+struct i2c_op_q_entry *i2c_entry_get(struct i2c_adapter *adap);
+void i2c_entry_put(struct i2c_adapter *adap,
+		   struct i2c_op_q_entry *entry);
+
+/*
+ * Called from an non-blocking interface to report that an operation
+ * has completed.  Can be called from interrupt context.
+ */
+void i2c_op_done(struct i2c_adapter *adap, struct i2c_op_q_entry *entry);
+
 /**
  * struct i2c_algorithm - represent I2C transfer method
  * @master_xfer: Issue a set of i2c transactions to the given I2C adapter
@@ -375,6 +424,35 @@ struct i2c_algorithm {
 	int (*smbus_xfer) (struct i2c_adapter *adap, u16 addr,
 			   unsigned short flags, char read_write,
 			   u8 command, int size, union i2c_smbus_data *data);
+
+	/*
+	 * These are like the previous calls, but they will only start
+	 * the operation.  The poll call will be called periodically
+	 * to drive the operation of the bus.  Each of these calls
+	 * should set the result on an error, and set the timeout as
+	 * necessary.  Note that even interrupt driven drivers need to
+	 * poll so they can time out operations.  Note that all the
+	 * data structures passed in are guaranteed to be kept around
+	 * until the operation completes.  These may be called from
+	 * interrupt context.  If the start operation fails, these
+	 * should return an error.  They are called with the queue lock
+	 * held, so they should not call i2c_op_done().
+	 */
+	int (*master_start)(struct i2c_adapter    *adap,
+			    struct i2c_op_q_entry *entry);
+	int (*smbus_start)(struct i2c_adapter    *adap,
+			   struct i2c_op_q_entry *entry);
+	/*
+	 * ns_since_last_poll is the amount of time since the last
+	 * time poll was called. Note that this may be *less* than the
+	 * time you requested, so always use this number and don't
+	 * assume it's the one you gave it.  This time is approximate
+	 * and is only guaranteed to be >= the time since the last
+	 * poll.  The value may be zero.
+	 */
+	void (*poll)(struct i2c_adapter *adap,
+		     struct i2c_op_q_entry *entry,
+		     unsigned int ns_since_last_poll);
 
 	/* To determine what the adapter supports */
 	u32 (*functionality) (struct i2c_adapter *);
@@ -431,6 +509,11 @@ struct i2c_adapter {
 
 	/* data fields that are valid for all devices	*/
 	struct rt_mutex bus_lock;
+
+	struct list_head q;
+	spinlock_t q_lock;
+
+	struct hrtimer timer;
 
 	int timeout;			/* in jiffies */
 	int retries;
@@ -544,6 +627,12 @@ static inline int i2c_adapter_id(struct i2c_adapter *adap)
 	return adap->nr;
 }
 
+/* Is the interface capable of using the non-blocking interface? */
+static inline int i2c_non_blocking_capable(struct i2c_adapter *adap)
+{
+	return adap->algo->poll != NULL;
+}
+
 /**
  * module_i2c_driver() - Helper macro for registering a I2C driver
  * @__i2c_driver: i2c_driver struct
@@ -584,6 +673,7 @@ static inline struct i2c_adapter *of_find_i2c_adapter_by_node(struct device_node
  */
 #define I2C_OP_I2C	0
 #define I2C_OP_SMBUS	1
+typedef void (*i2c_op_done_cb)(struct i2c_op_q_entry *entry);
 struct i2c_op_q_entry {
 	/*
 	 * The result will be set to the result of the operation when
@@ -601,6 +691,13 @@ struct i2c_op_q_entry {
 	 * Set to I2C_OP_I2C or I2C_OP_SMBUS depending on the transfer type.
 	 */
 	int            xfer_type;
+
+	/*
+	 * Handler may be called from interrupt context, so be
+	 * careful.
+	 */
+	i2c_op_done_cb handler;
+	void           *handler_data;
 
 	/*
 	 * Set up the i2c or smbus structure, depending on the transfer
@@ -639,11 +736,41 @@ struct i2c_op_q_entry {
 	} smbus;
 
 	/**************************************************************/
+	/* Bus Interface */
+	/*
+	 * The bus interface must set call_again_ns to the time in
+	 * nanoseconds until the next poll operation should be
+	 * called.  This *must* be set in the start operation
+	 * function.  The value may be changed in poll calls if the
+	 * bus interface needs different timeouts at different times.
+	 * The time_left and data can be used for anything the bus
+	 * interface likes.  data will be set to NULL before being
+	 * started; the bus interface must use that to tell if the
+	 * entry has been set up.  It should ignore poll operations on
+	 * entries that are not yet set up.
+	 */
+	unsigned long call_again_ns;
+	long          time_left;
+	void	      *data;
+
+	/**************************************************************/
 	/* Internals */
+	struct completion done;
+	unsigned long     end_jiffies;
+	unsigned int      tries;
+	unsigned char     use_timer;
+
+#define I2C_OP_QUEUED		0
+#define I2C_OP_INITIALIZED	1
+#define I2C_OP_FINISHED		2
+	unsigned char	  state;
 	u8                pec;
 	u8                partial_pec;
 	void (*complete)(struct i2c_adapter    *adap,
 			 struct i2c_op_q_entry *entry);
+
+	struct list_head link;
+	struct kref usecount;
 
 	/*
 	 * These are here for SMBus emulation over I2C.  I don't like
