@@ -1779,9 +1779,10 @@ EXPORT_SYMBOL(__i2c_transfer);
  * Note that there is no requirement that each message be sent to
  * the same slave address, although that is the most common model.
  */
-int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+static void i2c_transfer_entry(struct i2c_adapter *adap,
+			       struct i2c_op_q_entry *entry)
 {
-	int ret;
+	const struct i2c_algorithm *algo = adap->algo;
 
 	/* REVISIT the fault reporting model here is weak:
 	 *
@@ -1800,33 +1801,71 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	 *    (discarding status on the first one).
 	 */
 
-	if (adap->algo->master_xfer) {
+	entry->xfer_type = I2C_OP_I2C;
+	if (algo->master_xfer) {
 #ifdef DEBUG
-		for (ret = 0; ret < num; ret++) {
+		int ret;
+		for (ret = 0; ret < entry->i2c.num; ret++) {
 			dev_dbg(&adap->dev, "master_xfer[%d] %c, addr=0x%02x, "
-				"len=%d%s\n", ret, (msgs[ret].flags & I2C_M_RD)
-				? 'R' : 'W', msgs[ret].addr, msgs[ret].len,
-				(msgs[ret].flags & I2C_M_RECV_LEN) ? "+" : "");
+				"len=%d%s\n", ret,
+				(entry->i2c.msgs[ret].flags & I2C_M_RD ?
+				 'R' : 'W'),
+				entry->i2c.msgs[ret].addr,
+				entry->i2c.msgs[ret].len,
+				(entry->i2c.msgs[ret].flags & I2C_M_RECV_LEN) ? "+" : "");
 		}
 #endif
 
 		if (in_atomic() || irqs_disabled()) {
-			ret = i2c_trylock_adapter(adap);
-			if (!ret)
+			if (!i2c_trylock_adapter(adap)) {
 				/* I2C activity is ongoing. */
-				return -EAGAIN;
+				entry->result = -EAGAIN;
+				return;
+			}
 		} else {
 			i2c_lock_adapter(adap);
 		}
 
-		ret = __i2c_transfer(adap, msgs, num);
+		entry->result = __i2c_transfer(adap, entry->i2c.msgs,
+					       entry->i2c.num);
 		i2c_unlock_adapter(adap);
-
-		return ret;
+		if (entry->complete)
+			entry->complete(adap, entry);
 	} else {
 		dev_dbg(&adap->dev, "I2C level transfers not supported\n");
-		return -EOPNOTSUPP;
+		entry->result = -EOPNOTSUPP;
 	}
+}
+
+/**
+ * i2c_transfer - execute a single or combined I2C message
+ * @adap: Handle to I2C bus
+ * @msgs: One or more messages to execute before STOP is issued to
+ *	terminate the operation; each message begins with a START.
+ * @num: Number of messages to be executed.
+ *
+ * Returns negative errno, else the number of messages executed.
+ *
+ * Note that there is no requirement that each message be sent to
+ * the same slave address, although that is the most common model.
+ */
+int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+	struct i2c_op_q_entry *entry;
+	int                   rv;
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	entry->i2c.msgs = msgs;
+	entry->i2c.num = num;
+	entry->complete = NULL;
+
+	i2c_transfer_entry(adap, entry);
+	rv = entry->result;
+	kfree(entry);
+	return rv;
 }
 EXPORT_SYMBOL(i2c_transfer);
 
@@ -2368,77 +2407,54 @@ s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client, u8 command,
 }
 EXPORT_SYMBOL(i2c_smbus_write_i2c_block_data);
 
-static int i2c_smbus_emu_complete(struct i2c_adapter *adapter, u16 addr,
-				  unsigned short flags, char read_write,
-				  u8 command, int size,
-				  union i2c_smbus_data *data,
-				  struct i2c_msg *msg,
-				  u8 pec, u8 partial_pec,
-				  int result)
+static void i2c_smbus_emu_complete(struct i2c_adapter *adapter,
+				   struct i2c_op_q_entry *entry)
 {
-	unsigned char *msgbuf0 = msg[0].buf;
-	unsigned char *msgbuf1 = msg[1].buf;
-	int num = read_write == I2C_SMBUS_READ ? 2 : 1;
+	unsigned char *msgbuf0 = entry->i2c.msgs[0].buf;
+	unsigned char *msgbuf1 = entry->i2c.msgs[1].buf;
+	int num = entry->smbus.read_write == I2C_SMBUS_READ ? 2 : 1;
 	int i;
 	int status;
-	struct i2c_msg msg[2] = {
-		{
-			.addr = addr,
-			.flags = flags,
-			.len = 1,
-			.buf = msgbuf0,
-		}, {
-			.addr = addr,
-			.flags = flags | I2C_M_RD,
-			.len = 0,
-			.buf = msgbuf1,
-		},
-	};
 
-	if (result < 0)
-		return result;
+	if (entry->result < 0)
+		return;
 
-	if (read_write != I2C_SMBUS_READ)
-		return result;
+	if (entry->smbus.read_write != I2C_SMBUS_READ)
+		return;
 
-	switch (size) {
+	switch (entry->smbus.size) {
 	case I2C_SMBUS_BYTE:
-		data->byte = msgbuf0[0];
+		entry->smbus.data->byte = msgbuf0[0];
 		break;
 	case I2C_SMBUS_BYTE_DATA:
-		data->byte = msgbuf1[0];
+		entry->smbus.data->byte = msgbuf1[0];
 		break;
 	case I2C_SMBUS_WORD_DATA:
 	case I2C_SMBUS_PROC_CALL:
-		data->word = msgbuf1[0] | (msgbuf1[1] << 8);
+		entry->smbus.data->word = msgbuf1[0] | (msgbuf1[1] << 8);
 		break;
 	case I2C_SMBUS_I2C_BLOCK_DATA:
-		for (i = 0; i < data->block[0]; i++)
-			data->block[i + 1] = msgbuf1[i];
+		for (i = 0; i < entry->smbus.data->block[0]; i++)
+			entry->smbus.data->block[i + 1] = msgbuf1[i];
 		break;
 	case I2C_SMBUS_BLOCK_DATA:
 	case I2C_SMBUS_BLOCK_PROC_CALL:
 		for (i = 0; i < msgbuf1[0] + 1; i++)
-			data->block[i] = msgbuf1[i];
+			entry->smbus.data->block[i] = msgbuf1[i];
 		break;
 	}
 
 	/* Check PEC if last message is a read */
-	if (pec && (msg[num - 1].flags & I2C_M_RD)) {
-		status = i2c_smbus_check_pec(partial_pec, &msg[num - 1]);
+	if (entry->pec && (entry->i2c.msgs[num - 1].flags & I2C_M_RD)) {
+		status = i2c_smbus_check_pec(entry->partial_pec,
+					     &entry->i2c.msgs[num - 1]);
 		if (status < 0)
-			return status;
+			entry->result = status;
 	}
-
-	return 0;
 }
 
-static int i2c_smbus_emu_format(struct i2c_adapter *adapter, u16 addr,
-				unsigned short flags, char read_write,
-				u8 command, int size,
-				union i2c_smbus_data *data,
-				u8 *pec, u8 *partial_pec,
-				struct i2c_msg *msg)
+static int i2c_smbus_emu_format(struct i2c_adapter *adapter,
+				struct i2c_op_q_entry *entry)
 {
 	/*
 	 * So we need to generate a series of msgs. In the case of
@@ -2446,125 +2462,139 @@ static int i2c_smbus_emu_format(struct i2c_adapter *adapter, u16 addr,
 	 * need two. We initialize most things with sane defaults, to
 	 * keep the code below somewhat simpler.
 	 */
-	unsigned char *msgbuf0 = msg[0].buf;
-	int num = read_write == I2C_SMBUS_READ ? 2 : 1;
+	unsigned char *msgbuf0 = entry->msgbuf0;
+	int num = entry->smbus.read_write == I2C_SMBUS_READ ? 2 : 1;
+	struct i2c_msg *msg = entry->msg;
 	int i;
 
-	msg[0].addr = addr;
-	msg[0].flags = flags;
+	entry->i2c.msgs = msg;
+	entry->i2c.msgs[0].buf = msgbuf0;
+	entry->i2c.msgs[1].buf = entry->msgbuf1;
+
+	msg[0].addr = entry->smbus.addr;
+	msg[0].flags = entry->smbus.flags;
 	msg[0].len = 1;
-	msg[1].addr = addr;
-	msg[1].flags = flags | I2C_M_RD;
+	msg[1].addr = entry->smbus.addr;
+	msg[1].flags = entry->smbus.flags | I2C_M_RD;
 	msg[1].len = 0;
 
-	msgbuf0[0] = command;
-	switch (size) {
+	msgbuf0[0] = entry->smbus.command;
+	switch (entry->smbus.size) {
 	case I2C_SMBUS_QUICK:
 		msg[0].len = 0;
 		/* Special case: The read/write field is used as data */
-		msg[0].flags = flags | (read_write == I2C_SMBUS_READ ?
-					I2C_M_RD : 0);
+		msg[0].flags = (entry->smbus.flags |
+				((entry->smbus.read_write == I2C_SMBUS_READ)
+				 ? I2C_M_RD : 0));
 		num = 1;
 		break;
 	case I2C_SMBUS_BYTE:
-		if (read_write == I2C_SMBUS_READ) {
+		if (entry->smbus.read_write == I2C_SMBUS_READ) {
 			/* Special case: only a read! */
-			msg[0].flags = I2C_M_RD | flags;
+			msg[0].flags = I2C_M_RD | entry->smbus.flags;
 			num = 1;
 		}
 		break;
 	case I2C_SMBUS_BYTE_DATA:
-		if (read_write == I2C_SMBUS_READ)
+		if (entry->smbus.read_write == I2C_SMBUS_READ)
 			msg[1].len = 1;
 		else {
 			msg[0].len = 2;
-			msgbuf0[1] = data->byte;
+			msgbuf0[1] = entry->smbus.data->byte;
 		}
 		break;
 	case I2C_SMBUS_WORD_DATA:
-		if (read_write == I2C_SMBUS_READ)
+		if (entry->smbus.read_write == I2C_SMBUS_READ)
 			msg[1].len = 2;
 		else {
 			msg[0].len = 3;
-			msgbuf0[1] = data->word & 0xff;
-			msgbuf0[2] = data->word >> 8;
+			msgbuf0[1] = entry->smbus.data->word & 0xff;
+			msgbuf0[2] = entry->smbus.data->word >> 8;
 		}
 		break;
 	case I2C_SMBUS_PROC_CALL:
 		num = 2; /* Special case */
-		read_write = I2C_SMBUS_READ;
+		entry->smbus.read_write = I2C_SMBUS_READ;
 		msg[0].len = 3;
 		msg[1].len = 2;
-		msgbuf0[1] = data->word & 0xff;
-		msgbuf0[2] = data->word >> 8;
+		msgbuf0[1] = entry->smbus.data->word & 0xff;
+		msgbuf0[2] = entry->smbus.data->word >> 8;
 		break;
 	case I2C_SMBUS_BLOCK_DATA:
-		if (read_write == I2C_SMBUS_READ) {
+		if (entry->smbus.read_write == I2C_SMBUS_READ) {
 			msg[1].flags |= I2C_M_RECV_LEN;
 			msg[1].len = 1; /* block length will be added by
 					   the underlying bus driver */
 		} else {
-			msg[0].len = data->block[0] + 2;
+			msg[0].len = entry->smbus.data->block[0] + 2;
 			if (msg[0].len > I2C_SMBUS_BLOCK_MAX + 2) {
 				dev_err(&adapter->dev,
 					"Invalid block write size %d\n",
-					data->block[0]);
+					entry->smbus.data->block[0]);
 				return -EINVAL;
 			}
 			for (i = 1; i < msg[0].len; i++)
-				msgbuf0[i] = data->block[i-1];
+				msgbuf0[i] = entry->smbus.data->block[i - 1];
 		}
 		break;
 	case I2C_SMBUS_BLOCK_PROC_CALL:
 		num = 2; /* Another special case */
-		read_write = I2C_SMBUS_READ;
-		if (data->block[0] > I2C_SMBUS_BLOCK_MAX) {
+		entry->smbus.read_write = I2C_SMBUS_READ;
+		if (entry->smbus.data->block[0] > I2C_SMBUS_BLOCK_MAX) {
 			dev_err(&adapter->dev,
 				"Invalid block write size %d\n",
-				data->block[0]);
+				entry->smbus.data->block[0]);
 			return -EINVAL;
 		}
-		msg[0].len = data->block[0] + 2;
+		msg[0].len = entry->smbus.data->block[0] + 2;
 		for (i = 1; i < msg[0].len; i++)
-			msgbuf0[i] = data->block[i-1];
+			msgbuf0[i] = entry->smbus.data->block[i-1];
 		msg[1].flags |= I2C_M_RECV_LEN;
 		msg[1].len = 1; /* block length will be added by
 				   the underlying bus driver */
 		break;
 	case I2C_SMBUS_I2C_BLOCK_DATA:
-		if (read_write == I2C_SMBUS_READ) {
-			msg[1].len = data->block[0];
+		if (entry->smbus.read_write == I2C_SMBUS_READ) {
+			msg[1].len = entry->smbus.data->block[0];
 		} else {
-			msg[0].len = data->block[0] + 1;
+			msg[0].len = entry->smbus.data->block[0] + 1;
 			if (msg[0].len > I2C_SMBUS_BLOCK_MAX + 1) {
 				dev_err(&adapter->dev,
 					"Invalid block write size %d\n",
-					data->block[0]);
+					entry->smbus.data->block[0]);
 				return -EINVAL;
 			}
-			for (i = 1; i <= data->block[0]; i++)
-				msgbuf0[i] = data->block[i];
+			for (i = 1; i <= entry->smbus.data->block[0]; i++)
+				msgbuf0[i] = entry->smbus.data->block[i];
 		}
 		break;
 	default:
-		dev_err(&adapter->dev, "Unsupported transaction %d\n", size);
+		dev_err(&adapter->dev, "Unsupported transaction %d\n",
+			entry->smbus.size);
 		return -EOPNOTSUPP;
 	}
 
-	*pec = ((flags & I2C_CLIENT_PEC) && size != I2C_SMBUS_QUICK
-					 && size != I2C_SMBUS_I2C_BLOCK_DATA);
-	if (*pec) {
+	entry->pec = ((entry->smbus.flags & I2C_CLIENT_PEC)
+		      && entry->smbus.size != I2C_SMBUS_QUICK
+		      && entry->smbus.size != I2C_SMBUS_I2C_BLOCK_DATA);
+	if (entry->pec) {
 		/* Compute PEC if first message is a write */
 		if (!(msg[0].flags & I2C_M_RD)) {
 			if (num == 1) /* Write only */
 				i2c_smbus_add_pec(&msg[0]);
 			else /* Write followed by read */
-				*partial_pec = i2c_smbus_msg_pec(0, &msg[0]);
+				entry->partial_pec
+					= i2c_smbus_msg_pec(0, &msg[0]);
 		}
 		/* Ask for PEC if last message is a read */
 		if (msg[num - 1].flags & I2C_M_RD)
 			msg[num - 1].len++;
 	}
+
+	entry->xfer_type = I2C_OP_I2C;
+	entry->i2c.msgs = msg;
+	entry->i2c.num = num;
+	entry->complete = i2c_smbus_emu_complete;
 
 	return 0;
 }
@@ -2588,13 +2618,9 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 {
 	unsigned long orig_jiffies;
 	int try;
+	struct i2c_op_q_entry *entry;
 	s32 res;
 	const struct i2c_algorithm *algo = adapter->algo;
-	unsigned char msgbuf0[I2C_SMBUS_BLOCK_MAX + 3];
-	unsigned char msgbuf1[I2C_SMBUS_BLOCK_MAX + 2];
-	struct i2c_msg msg[2];
-	u8 pec = 0;
-	u8 partial_pec = 0;
 
 	/* If enabled, the following two tracepoints are conditional on
 	 * read_write and protocol.
@@ -2606,16 +2632,30 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 
 	flags &= I2C_M_TEN | I2C_CLIENT_PEC | I2C_CLIENT_SCCB;
 
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	entry->xfer_type = I2C_OP_SMBUS;
+	entry->smbus.addr = addr;
+	entry->smbus.flags = flags;
+	entry->smbus.read_write = read_write;
+	entry->smbus.command = command;
+	entry->smbus.size = protocol;
+	entry->smbus.data = data;
+	entry->complete = NULL;
+
 	if (algo->smbus_xfer) {
 		i2c_lock_adapter(adapter);
 
 		/* Retry automatically on arbitration loss */
 		orig_jiffies = jiffies;
-		for (res = 0, try = 0; try <= adapter->retries; try++) {
-			res = algo->smbus_xfer(adapter, addr, flags,
-					       read_write, command,
-					       protocol, data);
-			if (res != -EAGAIN)
+		for (try = 0; try <= adapter->retries; try++) {
+			entry->result = algo->smbus_xfer
+				(adapter, entry->smbus.addr, entry->smbus.flags,
+				 entry->smbus.read_write, entry->smbus.command,
+				 entry->smbus.size, entry->smbus.data);
+			if (entry->result != -EAGAIN)
 				break;
 			if (time_after(jiffies,
 				       orig_jiffies + adapter->timeout))
@@ -2623,28 +2663,29 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 		}
 		i2c_unlock_adapter(adapter);
 
-		if (res != -EOPNOTSUPP || !adapter->algo->master_xfer)
+		if (entry->result != -EOPNOTSUPP ||
+					!adapter->algo->master_xfer) {
+			if (entry->complete)
+				entry->complete(adapter, entry);
 			goto trace;
+		}
 		/*
 		 * Fall back to emulation if the adapter doesn't
 		 * implement native support for the SMBus operation.
 		 */
 	}
 
-	msg[0].buf = msgbuf0;
-	msg[1].buf = msgbuf1;
-	if (i2c_smbus_emu_format(adapter, addr, flags,
-				 read_write, command,
-				 protocol, data, &pec, &partial_pec,
-				 msg))
-		res = -EINVAL;
-	else {
-		res = i2c_transfer(adapter, msg, 2);
-		res = i2c_smbus_emu_complete(adapter, addr, flags,
-					     read_write, command,
-					     protocol, data, msg,
-					     pec, partial_pec,
-					     res);
+	if (i2c_smbus_emu_format(adapter, entry)) {
+		entry->result = -EINVAL;
+	} else {
+		i2c_transfer_entry(adapter, entry);
+		/*
+		 * We get these back with the result being the
+		 * number of bytes transferred.  We want zero for
+		 * success for this routine.
+		 */
+		if (entry->result > 0)
+			entry->result = 0;
 	}
 
 trace:
@@ -2654,6 +2695,11 @@ trace:
 	trace_smbus_result(adapter, addr, flags, read_write,
 			   command, protocol, res);
 
+out:
+	res = entry->result;
+	kfree(entry);
+	if (res > 0)
+		res = 0; /* Always return 0 on success */
 	return res;
 }
 EXPORT_SYMBOL(i2c_smbus_xfer);

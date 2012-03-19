@@ -46,6 +46,7 @@ struct i2c_client;
 struct i2c_driver;
 union i2c_smbus_data;
 struct i2c_board_info;
+struct i2c_op_q_entry;
 
 struct module;
 
@@ -583,7 +584,6 @@ static inline struct i2c_adapter *of_find_i2c_adapter_by_node(struct device_node
  */
 #define I2C_OP_I2C	0
 #define I2C_OP_SMBUS	1
-typedef void (*i2c_op_done_cb)(struct i2c_op_q_entry *entry);
 struct i2c_op_q_entry {
 	/*
 	 * The result will be set to the result of the operation when
@@ -601,13 +601,6 @@ struct i2c_op_q_entry {
 	 * Set to I2C_OP_I2C or I2C_OP_SMBUS depending on the transfer type.
 	 */
 	int            xfer_type;
-
-	/*
-	 * Handler may be called from interrupt context, so be
-	 * careful.
-	 */
-	i2c_op_done_cb handler;
-	void           *handler_data;
 
 	/*
 	 * Set up the i2c or smbus structure, depending on the transfer
@@ -646,41 +639,11 @@ struct i2c_op_q_entry {
 	} smbus;
 
 	/**************************************************************/
-	/* Bus Interface */
-	/*
-	 * The bus interface must set call_again_ns to the time in
-	 * nanoseconds until the next poll operation should be
-	 * called.  This *must* be set in the start operation
-	 * function.  The value may be changed in poll calls if the
-	 * bus interface needs different timeouts at different times.
-	 * The time_left and data can be used for anything the bus
-	 * interface likes.  data will be set to NULL before being
-	 * started; the bus interface must use that to tell if the
-	 * entry has been set up.  It should ignore poll operations on
-	 * entries that are not yet set up.
-	 */
-	unsigned long call_again_ns;
-	long          time_left;
-	void	      *data;
-
-	/**************************************************************/
 	/* Internals */
-	struct completion done;
-	unsigned long     end_jiffies;
-	unsigned int      tries;
-	unsigned char     use_timer;
-
-#define I2C_OP_QUEUED		0
-#define I2C_OP_INITIALIZED	1
-#define I2C_OP_FINISHED		2
-	unsigned char	  state;
 	u8                pec;
 	u8                partial_pec;
 	void (*complete)(struct i2c_adapter    *adap,
 			 struct i2c_op_q_entry *entry);
-
-	struct list_head link;
-	struct kref usecount;
 
 	/*
 	 * These are here for SMBus emulation over I2C.  I don't like
