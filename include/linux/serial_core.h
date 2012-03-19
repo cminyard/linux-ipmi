@@ -202,6 +202,11 @@ struct uart_port {
 
 	upf_t			flags;
 
+/*
+ * The port lock protects UPF_INUSE_DIRECT and UPF_INUSE_NORMAL.  One
+ * of those two bits must be set before any other bits can be changed
+ * in port->flags.
+ */
 #define UPF_FOURPORT		((__force upf_t) (1 << 1))
 #define UPF_SAK			((__force upf_t) (1 << 2))
 #define UPF_SPD_MASK		((__force upf_t) (0x1030))
@@ -212,6 +217,8 @@ struct uart_port {
 #define UPF_SPD_WARP		((__force upf_t) (0x1010))
 #define UPF_SKIP_TEST		((__force upf_t) (1 << 6))
 #define UPF_AUTO_IRQ		((__force upf_t) (1 << 7))
+#define UPF_INUSE_NORMAL	((__force upf_t) (1 << 8))
+#define UPF_INUSE_DIRECT	((__force upf_t) (1 << 9))
 #define UPF_HARDPPS_CD		((__force upf_t) (1 << 11))
 #define UPF_LOW_LATENCY		((__force upf_t) (1 << 13))
 #define UPF_BUGGY_UART		((__force upf_t) (1 << 14))
@@ -284,6 +291,9 @@ struct uart_state {
 	unsigned int		usflags;
 
 	struct uart_port	*uart_port;
+
+	/* For the direct serial interface */
+	struct uart_direct	*direct;
 };
 
 #define UART_XMIT_SIZE	PAGE_SIZE
@@ -291,6 +301,35 @@ struct uart_state {
 #define UART_STATE_TTY_REGISTERED 1 /* Devices is register with TTY layer. */
 #define UART_STATE_BOOT_ALLOCATED 2 /* Buffer was allocated by serial core */
 
+/*
+ * Structure used by the direct uart driver.
+ */
+struct uart_direct {
+	/* Generic data for use by the layered driver. */
+	void *direct_data;
+
+	/*
+	 * Port status, called with the port lock held.
+	 */
+	void (*handle_break)(struct uart_port *port);
+	void (*handle_dcd_change)(struct uart_port *port, unsigned int status);
+	void (*handle_cts_change)(struct uart_port *port, unsigned int status);
+
+	/*
+	 * A receive character from the port.  Called with the port
+	 * lock held, buffer and use the "push" function to actually
+	 * handle the characters.
+	 */
+	void (*handle_char)(struct uart_port *port, unsigned int status,
+			    unsigned int overrun, unsigned int ch,
+			    unsigned int flag);
+
+	/*
+	 * Done receiving characters for now, called with the port
+	 * lock not held.
+	 */
+	void (*push)(struct uart_port *port);
+};
 
 /* number of characters left in xmit buffer before we ask for more */
 #define WAKEUP_CHARS		256
@@ -325,6 +364,7 @@ struct uart_driver {
 	 */
 	struct uart_state	*state;
 	struct tty_driver	*tty_driver;
+	struct list_head        polled_link;
 };
 
 void uart_write_wakeup(struct uart_port *port);
@@ -371,6 +411,14 @@ void uart_unregister_driver(struct uart_driver *uart);
 int uart_add_one_port(struct uart_driver *reg, struct uart_port *port);
 int uart_remove_one_port(struct uart_driver *reg, struct uart_port *port);
 int uart_match_port(struct uart_port *port1, struct uart_port *port2);
+
+/*
+ * Direct serial port access.
+ */
+struct uart_port *uart_get_direct_port(char *name, int line);
+int uart_put_direct_port(struct uart_port *port);
+int uart_direct_write(struct uart_port *port, const unsigned char *buf,
+		      int count, int lock);
 
 /*
  * Power Management
@@ -456,7 +504,15 @@ static inline int uart_handle_break(struct uart_port *port)
 static inline void
 uart_push(struct uart_port *port)
 {
-	if (!port->state->port.tty)
+	struct uart_state *state = port->state;
+
+	if (state->direct) {
+		if (state->direct->push)
+			state->direct->push(port);
+		return;
+	}
+
+	if (!state->port.tty)
 		return;
 
 	tty_flip_buffer_push(&port->state->port);

@@ -1,0 +1,164 @@
+                    The direct serial interface
+		    ---------------------------
+
+Sometimes something in the kernel needs to use a serial port.  Maybe a
+device driver talks over a UART to its device.  Maybe a kernel
+debugger needs to run over a UART.  Maybe there is some kernel-level
+protocol that runs over a serial port.
+
+These sorts of things should normally use the tty line discipline for
+this, like ppp does.  This has several advantages: the driver does not
+need to be modified to support polling, the configuration of the
+serial port can be done by a user process, it can run over a pty as
+well as a UART (good for testing) and it's just the right thing to do
+in general.
+
+However, something may need to run when the system is not completely
+operational.  A kernel debugger, for instance, has to run when the
+kernel won't schedule.  Maybe a device needs to be accessed before the
+system is completely up.  Maybe the device needs something done to it
+when a panic occurs.  The direct interface exists for these needs.
+
+
+Driver Concerns
+---------------
+
+The low-level serial driver must support the poll functions to be able
+to be used as a direct interface and must register itself as a polled
+device.  If you don't need polling, well, you should be using the line
+discipline.  Beyond that, there are no special concerns for the driver.
+
+
+Using The Direct API
+--------------------
+
+The serial direct API uses as much of the existing interface to a UART
+as possible.  It uses the uart_port structure as the main interface
+between the user and the driver.  The user provides a struct
+uart_direct to the serial core to transfer information from the driver
+to the user.
+
+The user must claim the port with uart_get_direct_port().  It should
+do the following after the port is allocated:
+  1) If port->info->xmit.buf is NULL, set port->info->xmit.buf to a
+     byte array of size UART_XMIT_SIZE and set port->info->flags.
+     UIF_BOOT_ALLOCATED, and call uart_circ_clear(&port->info->xmit)
+  2) Set port->info->direct to the uart_direct structure for the user.
+  3) Initialize port->info->tlet to a tasklet function that will be
+     called when there is transmit buffer space ready, and set
+     the UIF_TASKLET_SETUP flag in port->info->flags.
+  4) Set port->info->direct->direct_data to whatever you need to
+     find the port in the direct callbacks.
+  5) Set port->info->direct->handle_char to an input character handler
+     routine.  See below for details.
+  6) Set port->info->direct->push to a routine to process input
+     characters.
+  7) Set the other routines in the direct structure as needed.
+  8) Call port->startup() to enable operation on the port and
+     port->set_termios() to do any configuration required on the port.
+
+When the user is done with the port, they should:
+  1) kill the tasklet in port->info->tlet
+  2) port->info->flags &= ~UIF_TASKLET_SETUP (to prevent your
+     tasklet routine from being called when the normal serial code
+     takes over).
+  3) If the driver supplied, port->info->xmit.buf, undo the changes
+     that were done to set it up, NULL the buffer pointer and clear
+     UIF_BOOT_ALLOCATED from port->info->flags.
+  4) call port->shutdown()
+
+to disable the port, then call uart_put_direct_port() to free the
+port.
+
+The uart_direct_write() function should be use write data to the UART.
+Data comes from the handle_char and push funcions in the uart_direct.
+Note that if the write buffer fills up, you can use the tasklet to
+tell you when data has been freed up in the write buffer.
+
+
+Polling the Interface
+---------------------
+
+Polling works much like the normal interface, except that you must
+call the port->poll() routine periodically and tell it what you want
+to poll (read, write, and/or modem control).  Also, the tasklets will
+not work, so any changes to CTS, DCD, or a break should be set as
+variables and actually processed once the port->poll() call returns.
+For transmit, the circular buffer status should be polled, too.
+This might look like
+
+	struct circ_buf *circ = uart_get_circ_buf(port);
+	port->ops->poll(port, UART_POLL_FLAGS_TX | UART_POLL_FLAGS_RX
+			| UART_POLL_FLAGS_MCTRL);
+	if (dcd_set) {
+		dcd_set = 0;
+		dcd_changed(...);
+	}
+	if (cts_set) {
+		cts_set = 0;
+		cts_changed(...);
+	}
+	if (uart_circ_chars_free(circ) > 0)
+		tx_ready(...);
+
+Polling is generally done when the entire system is single-threaded
+(like at panic time or when a debugger has shut down everything else),
+so locking is not that critical.
+
+
+The Direct API
+--------------
+
+The uart_direct structure has the following functions:
+  handle_break(port)
+	Called when a break comes in on the port.
+
+  handle_dcd_change(port, value)
+	Called when the DCD line changes on the port.  The status is
+	true if DCD is asserted, false if not.
+
+  handle_cts_change(port, value)
+	Called when the CTS line changes on the port.  The status is
+	true if CTS is asserted, false if not.
+
+  handle_char(port, status, overrun, ch, flag)
+	Handle a new input character.  status is a set of bits that
+	report errors.  If the bit specific by overrun (status & overrun != 0)
+	then an overrun has occured.  ch is the character.  flag reports
+	various conditions, like TTY_BREAK, TTY_PARITY, or TTY_FRAME for
+	a break, parity error, or framing error.  It is TTY_NORMAL for
+	normal characters without error.
+
+	Note that you should only queue the data in the above routine,
+	you should *NOT* process them because the port lock is held for
+	the port.  For breaks, DCD changes, and CTS
+	changes you should start a taskelet (or set a variable if
+	polling).  For characters, you should process them in the push
+	routine.
+
+  push(port)
+	Called when receipt of characters is complete, the user should
+	process incoming characters here (or schedule them to be
+	processed).
+
+The following functions are provided for the user:
+
+  struct uart_port *uart_get_direct_port(name, line, force)
+	Attempt to find a port with the given name and line.  The name
+	is something like "ttyS", the line is the line number of the
+	port.  If "force" is true, this call doesn't do any locking
+	and it doesn't care if the port is already in use.  Otherwise,
+	if the port is in use the call fails.  NULL is returned on a
+	failure, otherwise the uart port is returned.
+
+  uart_put_direct_port(port, force)
+	Free a port claimed with uart_get_direct_port.  If you
+	specified force when claiming the port, you should specify
+	force when returning it.
+
+  int uart_direct_write(port, buf, count)
+	Write count bytes from buf to the port's circular buffer.
+	This returns the number of bytes actually written. If the
+	number of bytes is larger than the circular buffer free space,
+	this will only write the number of bytes it can and return
+	immediately.
