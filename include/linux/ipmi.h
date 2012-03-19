@@ -81,6 +81,7 @@ struct ipmi_recv_msg {
 };
 
 /* Allocate and free the receive message. */
+struct ipmi_recv_msg *ipmi_alloc_recv_msg(void);
 void ipmi_free_recv_msg(struct ipmi_recv_msg *msg);
 
 struct ipmi_user_hndl {
@@ -176,6 +177,18 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
 			     int                  priority);
 
 /*
+ * Like ipmi_request, but lets you specify the slave return address.
+ */
+int ipmi_request_with_source(ipmi_user_t      user,
+			     struct ipmi_addr *addr,
+			     long             msgid,
+			     struct kernel_ipmi_msg  *msg,
+			     void             *user_msg_data,
+			     int              priority,
+			     unsigned char    source_address,
+			     unsigned char    source_lun);
+
+/*
  * Poll the IPMI interface for the user.  This causes the IPMI code to
  * do an immediate check for information from the driver and handle
  * anything that is immediately pending.  This will not block in any
@@ -183,6 +196,16 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
  * happen in the IPMI driver.
  */
 void ipmi_poll_interface(ipmi_user_t user);
+
+/*
+ * Register the given user to handle all received IPMI commands.  This
+ * will fail if anyone is registered as a command receiver or if
+ * another is already registered to receive all commands.  NOTE THAT
+ * THIS IS FOR EMULATION USERS ONLY, DO NOT USER THIS FOR NORMAL
+ * STUFF.
+ */
+int ipmi_register_all_cmd_rcvr(ipmi_user_t user);
+int ipmi_unregister_all_cmd_rcvr(ipmi_user_t user);
 
 /*
  * When commands come in to the SMS, the user can register to receive
@@ -270,6 +293,9 @@ unsigned int ipmi_addr_length(int addr_type);
 
 /* Validate that the given IPMI address is valid. */
 int ipmi_validate_addr(struct ipmi_addr *addr, int len);
+
+/* Return 1 if the given addresses are equal, 0 if not. */
+int ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2);
 
 /*
  * How did the IPMI driver find out about the device?
