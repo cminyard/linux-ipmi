@@ -48,6 +48,7 @@ struct i2c_client;
 struct i2c_driver;
 union i2c_smbus_data;
 struct i2c_board_info;
+struct i2c_op_q_entry;
 
 struct module;
 
@@ -616,4 +617,83 @@ union i2c_smbus_data {
 #define I2C_SMBUS_BLOCK_PROC_CALL   7		/* SMBus 2.0 */
 #define I2C_SMBUS_I2C_BLOCK_DATA    8
 
+#ifdef __KERNEL__
+
+/*
+ * Hold an I2C operation to perform, and used to pass data around.
+ */
+#define I2C_OP_I2C	0
+#define I2C_OP_SMBUS	1
+struct i2c_op_q_entry {
+	/*
+	 * The result will be set to the result of the operation when
+	 * it completes.
+	 */
+	s32 result;
+
+	/**************************************************************/
+	/*
+	 * Public interface.  The user should set these up (and the
+	 * proper structure below).
+	 */
+
+	/*
+	 * Set to I2C_OP_I2C or I2C_OP_SMBUS depending on the transfer type.
+	 */
+	int            xfer_type;
+
+	/*
+	 * Set up the i2c or smbus structure, depending on the transfer
+	 * type.
+	 *
+	 * Note that i2c and smbus are not in a union because an smbus
+	 * operation may be converted into an i2c operation (thus both
+	 * structures will be used).  The data in these may be changed
+	 * by the driver.
+	 */
+	struct {
+		struct i2c_msg *msgs;
+		int num;
+	} i2c;
+	struct {
+		/*
+		 * Addr and flags are filled in by the non-blocking
+		 * send routine that takes a client.
+		 */
+		u16 addr;
+		unsigned short flags;
+
+		char read_write;
+		u8 command;
+
+		/*
+		 * Note that the size is *not* the length of the data.
+		 * It is the transaction type, like I2C_SMBUS_QUICK
+		 * and the ones after that below.  If this is a block
+		 * transaction, the length of the rest of the data is
+		 * in the first byte of the data, for both transmit
+		 * and receive.
+		 */
+		int size;
+		union i2c_smbus_data *data;
+	} smbus;
+
+	/**************************************************************/
+	/* Internals */
+	u8                pec;
+	u8                partial_pec;
+	void (*complete)(struct i2c_adapter    *adap,
+			 struct i2c_op_q_entry *entry);
+
+	/*
+	 * These are here for SMBus emulation over I2C.  I don't like
+	 * them taking this much room in the data structure, but they
+	 * need to be available in this case.
+	 */
+	unsigned char msgbuf0[I2C_SMBUS_BLOCK_MAX + 3];
+	unsigned char msgbuf1[I2C_SMBUS_BLOCK_MAX + 2];
+	struct i2c_msg msg[2];
+};
+
+#endif /* __KERNEL__ */
 #endif /* _LINUX_I2C_H */
