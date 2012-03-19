@@ -605,6 +605,12 @@ uart_insert_char(struct uart_port *port, unsigned int status,
 		tty_insert_flip_char(tty, 0, TTY_OVERRUN);
 }
 
+static inline void
+uart_push(struct uart_port *port)
+{
+	tty_flip_buffer_push(port->state->port.tty);
+}
+
 /*
  *	UART_ENABLE_MS - determine if port should enable modem status irqs
  */
