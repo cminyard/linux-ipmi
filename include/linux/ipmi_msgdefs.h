@@ -71,6 +71,9 @@
 #define IPMI_NETFN_FIRMWARE_REQUEST		0x08
 #define IPMI_NETFN_FIRMWARE_RESPONSE		0x09
 
+#define IPMI_NETFN_OEM_REQUEST			0x2e
+#define IPMI_NETFN_OEM_RESPONSE			0x2f
+
 /* The default slave address */
 #define IPMI_BMC_SLAVE_ADDR	0x20
 
