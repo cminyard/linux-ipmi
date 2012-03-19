@@ -336,6 +336,8 @@ int uart_resume_port(struct uart_driver *reg, struct uart_port *port);
 
 #define uart_circ_empty(circ)		((circ)->head == (circ)->tail)
 #define uart_circ_clear(circ)		((circ)->head = (circ)->tail = 0)
+#define uart_get_circ_buf(port)		(&(port)->state->xmit)
+#define uart_wrap_circ_buf(val)		((val) & (UART_XMIT_SIZE - 1))
 
 #define uart_circ_chars_pending(circ)	\
 	(CIRC_CNT((circ)->head, (circ)->tail, UART_XMIT_SIZE))

@@ -1423,7 +1423,7 @@ EXPORT_SYMBOL_GPL(serial8250_rx_chars);
 void serial8250_tx_chars(struct uart_8250_port *up)
 {
 	struct uart_port *port = &up->port;
-	struct circ_buf *xmit = &port->state->xmit;
+	struct circ_buf *xmit = uart_get_circ_buf(port);
 	int count;
 
 	if (port->x_char) {
@@ -1444,7 +1444,7 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 	count = up->tx_loadsz;
 	do {
 		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+		xmit->tail = uart_wrap_circ_buf(xmit->tail + 1);
 		port->icount.tx++;
 		if (uart_circ_empty(xmit))
 			break;
@@ -1737,6 +1737,7 @@ static void serial8250_timeout(unsigned long data)
 static void serial8250_backup_timeout(unsigned long data)
 {
 	struct uart_8250_port *up = (struct uart_8250_port *)data;
+	struct circ_buf *xmit = uart_get_circ_buf(&up->port);
 	unsigned int iir, ier = 0, lsr;
 	unsigned long flags;
 
@@ -1762,7 +1763,7 @@ static void serial8250_backup_timeout(unsigned long data)
 	lsr = serial_in(up, UART_LSR);
 	up->lsr_saved_flags |= lsr & LSR_SAVE_FLAGS;
 	if ((iir & UART_IIR_NO_INT) && (up->ier & UART_IER_THRI) &&
-	    (!uart_circ_empty(&up->port.state->xmit) || up->port.x_char) &&
+	    (!uart_circ_empty(xmit) || up->port.x_char) &&
 	    (lsr & UART_LSR_THRE)) {
 		iir &= ~(UART_IIR_ID | UART_IIR_NO_INT);
 		iir |= UART_IIR_THRI;
