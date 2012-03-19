@@ -560,6 +560,22 @@ static void panic_halt_ipmi_set_timeout(void)
 }
 
 /*
+ * Do a delayed shutdown, with the delay in milliseconds.  If power_off is
+ * false, do a reset.  If power_off is true, do a power down.  This is
+ * primarily for the IMB code's shutdown.
+ */
+void ipmi_delayed_shutdown(long delay, int power_off)
+{
+	ipmi_ignore_heartbeat = 1;
+	if (power_off)
+		ipmi_watchdog_state = WDOG_TIMEOUT_POWER_DOWN;
+	else
+		ipmi_watchdog_state = WDOG_TIMEOUT_RESET;
+	timeout = delay;
+	ipmi_set_timeout(IPMI_SET_TIMEOUT_HB_IF_NECESSARY);
+}
+
+/*
  * We use a mutex to make sure that only one thing can send a
  * heartbeat at one time, because we only have one copy of the data.
  * The semaphore is claimed when the set_timeout is sent and freed
@@ -1380,6 +1396,9 @@ static void __exit ipmi_wdog_exit(void)
 }
 module_exit(ipmi_wdog_exit);
 module_init(ipmi_wdog_init);
+
+EXPORT_SYMBOL(ipmi_delayed_shutdown);
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Corey Minyard <minyard@mvista.com>");
 MODULE_DESCRIPTION("watchdog timer based upon the IPMI interface.");

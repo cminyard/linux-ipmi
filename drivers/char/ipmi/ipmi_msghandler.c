@@ -51,7 +51,6 @@
 
 #define IPMI_DRIVER_VERSION "39.2"
 
-static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void);
 static int ipmi_init_msghandler(void);
 static void smi_recv_tasklet(unsigned long);
 static void handle_new_recv_msgs(ipmi_smi_t intf);
@@ -403,6 +402,14 @@ struct ipmi_smi {
 	int              last_needs_timer;
 
 	/*
+	 * This will be non-null if someone registers to receive all
+	 * IPMI commands (this is for interface emulation).  There
+	 * may not be any things in the cmd_rcvrs list above when
+	 * this is registered.
+	 */
+	volatile ipmi_user_t all_cmd_rcvr;
+
+	/*
 	 * The event receiver for my BMC, only really used at panic
 	 * shutdown as a place to store this.
 	 */
@@ -629,7 +636,7 @@ call_smi_watchers(int i, struct device *dev)
 	}
 }
 
-static int
+int
 ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2)
 {
 	if (addr1->addr_type != addr2->addr_type)
@@ -671,6 +678,7 @@ ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2)
 
 	return 1;
 }
+EXPORT_SYMBOL(ipmi_addr_equal);
 
 int ipmi_validate_addr(struct ipmi_addr *addr, int len)
 {
@@ -1070,6 +1078,8 @@ int ipmi_destroy_user(ipmi_user_t user)
 	 * synchronize_rcu()) then free everything in that list.
 	 */
 	mutex_lock(&intf->cmd_rcvrs_mutex);
+	if (intf->all_cmd_rcvr == user)
+		intf->all_cmd_rcvr = NULL;
 	list_for_each_entry_rcu(rcvr, &intf->cmd_rcvrs, link) {
 		if (rcvr->user == user) {
 			list_del_rcu(&rcvr->link);
@@ -1320,6 +1330,10 @@ int ipmi_register_for_cmd(ipmi_user_t   user,
 	rcvr->user = user;
 
 	mutex_lock(&intf->cmd_rcvrs_mutex);
+	if (user->intf->all_cmd_rcvr != NULL) {
+		rv = -EBUSY;
+		goto out_unlock;
+	}
 	/* Make sure the command/netfn is not already registered. */
 	if (!is_cmd_rcvr_exclusive(intf, netfn, cmd, chans)) {
 		rv = -EBUSY;
@@ -2926,6 +2940,7 @@ int ipmi_register_smi(struct ipmi_smi_handlers *handlers,
 	init_waitqueue_head(&intf->waitq);
 	for (i = 0; i < IPMI_NUM_STATS; i++)
 		atomic_set(&intf->stats[i], 0);
+	intf->all_cmd_rcvr = NULL;
 
 	intf->proc_dir = NULL;
 
@@ -3152,12 +3167,15 @@ static int handle_ipmb_get_msg_cmd(ipmi_smi_t          intf,
 	chan = msg->rsp[3] & 0xf;
 
 	rcu_read_lock();
-	rcvr = find_cmd_rcvr(intf, netfn, cmd, chan);
-	if (rcvr) {
-		user = rcvr->user;
-		kref_get(&user->refcount);
-	} else
-		user = NULL;
+	user = intf->all_cmd_rcvr;
+	if (!user) {
+		rcvr = find_cmd_rcvr(intf, netfn, cmd, chan);
+		if (rcvr) {
+			user = rcvr->user;
+			kref_get(&user->refcount);
+		} else
+			user = NULL;
+	}
 	rcu_read_unlock();
 
 	if (user == NULL) {
@@ -3341,12 +3359,15 @@ static int handle_lan_get_msg_cmd(ipmi_smi_t          intf,
 	chan = msg->rsp[3] & 0xf;
 
 	rcu_read_lock();
-	rcvr = find_cmd_rcvr(intf, netfn, cmd, chan);
-	if (rcvr) {
-		user = rcvr->user;
-		kref_get(&user->refcount);
-	} else
-		user = NULL;
+	user = intf->all_cmd_rcvr;
+	if (!user) {
+		rcvr = find_cmd_rcvr(intf, netfn, cmd, chan);
+		if (rcvr) {
+			user = rcvr->user;
+			kref_get(&user->refcount);
+		} else
+			user = NULL;
+	}
 	rcu_read_unlock();
 
 	if (user == NULL) {
@@ -4233,7 +4254,7 @@ static void free_recv_msg(struct ipmi_recv_msg *msg)
 	kfree(msg);
 }
 
-static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void)
+struct ipmi_recv_msg *ipmi_alloc_recv_msg(void)
 {
 	struct ipmi_recv_msg *rv;
 
@@ -4245,6 +4266,7 @@ static struct ipmi_recv_msg *ipmi_alloc_recv_msg(void)
 	}
 	return rv;
 }
+EXPORT_SYMBOL(ipmi_alloc_recv_msg);
 
 void ipmi_free_recv_msg(struct ipmi_recv_msg *msg)
 {
@@ -4253,6 +4275,60 @@ void ipmi_free_recv_msg(struct ipmi_recv_msg *msg)
 	msg->done(msg);
 }
 EXPORT_SYMBOL(ipmi_free_recv_msg);
+
+int
+ipmi_register_all_cmd_rcvr(ipmi_user_t user)
+{
+	int           rv = -EBUSY;
+
+	mutex_lock(&user->intf->cmd_rcvrs_mutex);
+	if ((user->intf->all_cmd_rcvr == NULL)
+	    && (list_empty(&user->intf->cmd_rcvrs))) {
+		user->intf->all_cmd_rcvr = user;
+		rv = 0;
+	}
+	mutex_unlock(&user->intf->cmd_rcvrs_mutex);
+	return rv;
+}
+EXPORT_SYMBOL(ipmi_register_all_cmd_rcvr);
+
+int
+ipmi_unregister_all_cmd_rcvr(ipmi_user_t user)
+{
+	int           rv = -EINVAL;
+
+	mutex_lock(&user->intf->cmd_rcvrs_mutex);
+	if (user->intf->all_cmd_rcvr == user) {
+		user->intf->all_cmd_rcvr = NULL;
+		rv = 0;
+	}
+	mutex_unlock(&user->intf->cmd_rcvrs_mutex);
+	return rv;
+}
+EXPORT_SYMBOL(ipmi_unregister_all_cmd_rcvr);
+
+int ipmi_request_with_source(ipmi_user_t      user,
+			     struct ipmi_addr *addr,
+			     long             msgid,
+			     struct kernel_ipmi_msg  *msg,
+			     void             *user_msg_data,
+			     int              priority,
+			     unsigned char    source_address,
+			     unsigned char    source_lun)
+{
+	return i_ipmi_request(user,
+			      user->intf,
+			      addr,
+			      msgid,
+			      msg,
+			      user_msg_data,
+			      NULL, NULL,
+			      priority,
+			      source_address,
+			      source_lun,
+			      -1, 0);
+}
+EXPORT_SYMBOL(ipmi_request_with_source);
 
 #ifdef CONFIG_IPMI_PANIC_EVENT
 

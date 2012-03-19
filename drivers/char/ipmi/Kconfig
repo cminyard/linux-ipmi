@@ -136,4 +136,18 @@ config IPMI_POWEROFF
          This enables a function to power off the system with IPMI if
 	 the IPMI management controller is capable of this.
 
+config IPMI_EMULATE_RADISYS
+       tristate 'Emulate Radisys IPMI driver'
+       depends on IPMI_HANDLER
+       help
+         This enables emulation of the Radisys IPMI device driver.
+
+config IPMI_EMULATE_IMB
+       tristate 'Emulate Intel IBM driver'
+       depends on IPMI_HANDLER && IPMI_WATCHDOG
+       help
+         This enables emulation of the Intel IMB device driver.  Note that you
+	 MUST have the IPMI watchdog timer enabled to use this.  This code
+	 uses some of the watchdog code.
+
 endif # IPMI_HANDLER
