@@ -1413,9 +1413,6 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 ignore_char:
 		lsr = serial_in(up, UART_LSR);
 	} while ((lsr & (UART_LSR_DR | UART_LSR_BI)) && (max_count-- > 0));
-	spin_unlock(&port->lock);
-	uart_push(&up->port);
-	spin_lock(&port->lock);
 	return lsr;
 }
 EXPORT_SYMBOL_GPL(serial8250_rx_chars);
@@ -1516,6 +1513,9 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 
 		if (!up->dma || dma_err)
 			status = serial8250_rx_chars(up, status);
+		spin_unlock_irqrestore(&up->port.lock, flags);
+		uart_push(&up->port);
+		spin_lock_irqsave(&up->port.lock, flags);
 	}
 	serial8250_modem_status(up);
 	if (!up->dma && (status & UART_LSR_THRE))
@@ -2727,6 +2727,75 @@ serial8250_type(struct uart_port *port)
 	return uart_config[type].name;
 }
 
+static void serial8250_poll(struct uart_port *port, unsigned int flags)
+{
+	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	unsigned int status;
+
+	status = serial_port_in(port, UART_LSR);
+
+	if ((flags & UART_POLL_FLAGS_RX) && (status & UART_LSR_DR))
+		status = serial8250_rx_chars(up, status);
+	else
+		up->lsr_saved_flags |= status & LSR_SAVE_FLAGS;
+
+	if (flags & UART_POLL_FLAGS_MCTRL)
+		serial8250_modem_status(up);
+
+	if ((flags & UART_POLL_FLAGS_TX) && (status & UART_LSR_THRE)) {
+		struct circ_buf *xmit = uart_get_circ_buf(&up->port);
+
+		if (!uart_circ_empty(xmit)) {
+			serial_out(up, UART_TX, xmit->buf[xmit->tail]);
+			xmit->tail = uart_wrap_circ_buf(xmit->tail + 1);
+			up->port.icount.tx++;
+		}
+	}
+}
+
+static int serial8250_poll_startup(struct uart_port *port,
+				   unsigned long *pflags)
+{
+	struct uart_8250_port *up = (struct uart_8250_port *) port;
+
+	*pflags = serial_in(up, UART_IER);
+
+	if (up->capabilities & UART_CAP_UUE)
+		serial_out(up, UART_IER, UART_IER_UUE);
+	else
+		serial_out(up, UART_IER, 0);
+
+	return 0;
+}
+
+static void serial8250_poll_shutdown(struct uart_port *port,
+				     unsigned long pflags)
+{
+	struct uart_8250_port *up = (struct uart_8250_port *) port;
+
+	wait_for_xmitr(up, BOTH_EMPTY);
+	serial_out(up, UART_IER, pflags);
+
+	/*
+	 *	The receive handling will happen properly because the
+	 *	receive ready bit will still be set; it is not cleared
+	 *	on read.  However, modem control will not, we must
+	 *	call it if we have saved something in the saved flags
+	 *	while processing with interrupts off.
+	 */
+	if (up->msr_saved_flags)
+		serial8250_modem_status(up);
+}
+
+int serial8250_in_flow_control(struct uart_port *port)
+{
+	struct uart_8250_port *up = (struct uart_8250_port *) port;
+	unsigned int msr = serial_in(up, UART_MSR);
+
+	up->msr_saved_flags |= msr & MSR_SAVE_FLAGS;
+	return !(msr & UART_MSR_CTS);
+}
+
 static struct uart_ops serial8250_pops = {
 	.tx_empty	= serial8250_tx_empty,
 	.set_mctrl	= serial8250_set_mctrl,
@@ -2741,6 +2810,10 @@ static struct uart_ops serial8250_pops = {
 	.set_termios	= serial8250_set_termios,
 	.set_ldisc	= serial8250_set_ldisc,
 	.pm		= serial8250_pm,
+	.poll		= serial8250_poll,
+	.poll_startup	= serial8250_poll_startup,
+	.poll_shutdown	= serial8250_poll_shutdown,
+	.in_flow_control = serial8250_in_flow_control,
 	.type		= serial8250_type,
 	.release_port	= serial8250_release_port,
 	.request_port	= serial8250_request_port,
@@ -2753,6 +2826,7 @@ static struct uart_ops serial8250_pops = {
 };
 
 static struct uart_8250_port serial8250_ports[UART_NR];
+static struct uart_port *serial8250_pollable_ports[UART_NR];
 
 static void (*serial8250_isa_config)(int port, struct uart_port *up,
 	unsigned short *capabilities);
@@ -2855,96 +2929,6 @@ serial8250_register_ports(struct uart_driver *drv, struct device *dev)
 }
 
 #ifdef CONFIG_SERIAL_8250_CONSOLE
-
-static void serial8250_console_putchar(struct uart_port *port, int ch)
-{
-	struct uart_8250_port *up =
-		container_of(port, struct uart_8250_port, port);
-
-	wait_for_xmitr(up, UART_LSR_THRE);
-	serial_port_out(port, UART_TX, ch);
-}
-
-/*
- *	Print a string to the serial port trying not to disturb
- *	any possible real use of the port...
- *
- *	The console_lock must be held when we get here.
- */
-static void
-serial8250_console_write(struct console *co, const char *s, unsigned int count)
-{
-	struct uart_8250_port *up = &serial8250_ports[co->index];
-	struct uart_port *port = &up->port;
-	unsigned long flags;
-	unsigned int ier;
-	int locked = 1;
-
-	touch_nmi_watchdog();
-
-	if (port->sysrq || oops_in_progress)
-		locked = spin_trylock_irqsave(&port->lock, flags);
-	else
-		spin_lock_irqsave(&port->lock, flags);
-
-	/*
-	 *	First save the IER then disable the interrupts
-	 */
-	ier = serial_port_in(port, UART_IER);
-
-	if (up->capabilities & UART_CAP_UUE)
-		serial_port_out(port, UART_IER, UART_IER_UUE);
-	else
-		serial_port_out(port, UART_IER, 0);
-
-	uart_console_write(port, s, count, serial8250_console_putchar);
-
-	/*
-	 *	Finally, wait for transmitter to become empty
-	 *	and restore the IER
-	 */
-	wait_for_xmitr(up, BOTH_EMPTY);
-	serial_port_out(port, UART_IER, ier);
-
-	/*
-	 *	The receive handling will happen properly because the
-	 *	receive ready bit will still be set; it is not cleared
-	 *	on read.  However, modem control will not, we must
-	 *	call it if we have saved something in the saved flags
-	 *	while processing with interrupts off.
-	 */
-	if (up->msr_saved_flags)
-		serial8250_modem_status(up);
-
-	if (locked)
-		spin_unlock_irqrestore(&port->lock, flags);
-}
-
-static int __init serial8250_console_setup(struct console *co, char *options)
-{
-	struct uart_port *port;
-	int baud = 9600;
-	int bits = 8;
-	int parity = 'n';
-	int flow = 'n';
-
-	/*
-	 * Check whether an invalid uart number has been specified, and
-	 * if so, search for the first available port that does have
-	 * console support.
-	 */
-	if (co->index >= nr_uarts)
-		co->index = 0;
-	port = &serial8250_ports[co->index].port;
-	if (!port->iobase && !port->membase)
-		return -ENODEV;
-
-	if (options)
-		uart_parse_options(options, &baud, &parity, &bits, &flow);
-
-	return uart_set_options(port, co, baud, parity, bits, flow);
-}
-
 static int serial8250_console_early_setup(void)
 {
 	return serial8250_find_port_for_earlycon();
@@ -2952,13 +2936,7 @@ static int serial8250_console_early_setup(void)
 
 static struct console serial8250_console = {
 	.name		= "ttyS",
-	.write		= serial8250_console_write,
-	.device		= uart_console_device,
-	.setup		= serial8250_console_setup,
-	.early_setup	= serial8250_console_early_setup,
-	.flags		= CON_PRINTBUFFER | CON_ANYTIME,
-	.index		= -1,
-	.data		= &serial8250_reg,
+	.early_setup	= serial8250_console_early_setup
 };
 
 static int __init serial8250_console_init(void)
@@ -2995,6 +2973,34 @@ static struct uart_driver serial8250_reg = {
 	.minor			= 64,
 	.cons			= SERIAL8250_CONSOLE,
 };
+
+static int __init serial8250_polled_init(void)
+{
+	int i;
+	static int initialized;
+
+	if (initialized)
+		return 0;
+	initialized = 1;
+
+	if (nr_uarts > UART_NR)
+		nr_uarts = UART_NR;
+
+	serial8250_isa_init_ports();
+
+	for (i = 0; i < nr_uarts; i++) {
+		serial8250_ports[i].port.ops = &serial8250_pops;
+		serial8250_pollable_ports[i] = &serial8250_ports[i].port;
+	}
+	serial8250_reg.pollable_ports = serial8250_pollable_ports;
+	serial8250_reg.nr_pollable = nr_uarts;
+	serial8250_reg.nr = UART_NR;
+
+	uart_register_polled(&serial8250_reg);
+
+	return 0;
+}
+console_initcall(serial8250_polled_init);
 
 /*
  * early_serial_setup - early registration for 8250 ports
@@ -3346,6 +3352,8 @@ static int __init serial8250_init(void)
 		"%d ports, IRQ sharing %sabled\n", nr_uarts,
 		share_irqs ? "en" : "dis");
 
+	serial8250_polled_init();
+
 #ifdef CONFIG_SPARC
 	ret = sunserial_register_minors(&serial8250_reg, UART_NR);
 #else
@@ -3387,6 +3395,8 @@ unreg_uart_drv:
 #else
 	uart_unregister_driver(&serial8250_reg);
 #endif
+
+	uart_unregister_polled(&serial8250_reg);
 out:
 	return ret;
 }
@@ -3412,6 +3422,8 @@ static void __exit serial8250_exit(void)
 #else
 	uart_unregister_driver(&serial8250_reg);
 #endif
+
+	uart_unregister_polled(&serial8250_reg);
 }
 
 module_init(serial8250_init);
