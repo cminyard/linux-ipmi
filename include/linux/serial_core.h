@@ -33,6 +33,7 @@
 #include <uapi/linux/serial_core.h>
 
 #ifdef CONFIG_SERIAL_CORE_CONSOLE
+#include <linux/nmi.h>
 #define uart_console(port) \
 	((port)->cons && (port)->cons->index == (port)->line)
 #else
