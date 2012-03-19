@@ -50,6 +50,8 @@ static struct lock_class_key port_lock_key;
 
 #define HIGH_BITS_OFFSET	((sizeof(long)-sizeof(int))*8)
 
+#define PORT_INUSE (UPF_INUSE_NORMAL | UPF_INUSE_DIRECT)
+
 #ifdef CONFIG_SERIAL_CORE_CONSOLE
 #include <linux/nmi.h>
 #define uart_console(port)	((port)->cons && (port)->cons->index == (port)->line)
@@ -157,7 +159,6 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 
 		state->xmit.buf = (unsigned char *) page;
 		uart_circ_clear(&state->xmit);
-		state->usflags |= UART_STATE_BOOT_ALLOCATED;
 	}
 
 	retval = uport->ops->startup(uport);
@@ -266,7 +267,6 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 	if (state->xmit.buf && !(state->usflags & UART_STATE_BOOT_ALLOCATED)) {
 		free_page((unsigned long)state->xmit.buf);
 		state->xmit.buf = NULL;
-		state->usflags &= ~UART_STATE_BOOT_ALLOCATED;
 	}
 
 	state->usflags &= ~UART_STATE_TTY_REGISTERED;
@@ -509,6 +509,27 @@ static void uart_flush_chars(struct tty_struct *tty)
 	uart_start(tty);
 }
 
+static int uart_circ_write(struct circ_buf *circ, const unsigned char *buf,
+			   int count)
+{
+	int c, ret = 0;
+
+	while (1) {
+		c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
+		if (count < c)
+			c = count;
+		if (c <= 0)
+			break;
+		memcpy(circ->buf + circ->head, buf, c);
+		circ->head = (circ->head + c) & (UART_XMIT_SIZE - 1);
+		buf += c;
+		count -= c;
+		ret += c;
+	}
+
+	return ret;
+}
+
 static int uart_write(struct tty_struct *tty,
 					const unsigned char *buf, int count)
 {
@@ -516,7 +537,7 @@ static int uart_write(struct tty_struct *tty,
 	struct uart_port *port;
 	struct circ_buf *circ;
 	unsigned long flags;
-	int c, ret = 0;
+	int ret;
 
 	/*
 	 * This means you called this function _after_ the port was
@@ -534,18 +555,7 @@ static int uart_write(struct tty_struct *tty,
 		return 0;
 
 	spin_lock_irqsave(&port->lock, flags);
-	while (1) {
-		c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
-		if (count < c)
-			c = count;
-		if (c <= 0)
-			break;
-		memcpy(circ->buf + circ->head, buf, c);
-		circ->head = (circ->head + c) & (UART_XMIT_SIZE - 1);
-		buf += c;
-		count -= c;
-		ret += c;
-	}
+	ret = uart_circ_write(circ, buf, count);
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	uart_start(tty);
@@ -1389,6 +1399,9 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	 * Wake up anyone trying to open this port.
 	 */
 	clear_bit(ASYNCB_NORMAL_ACTIVE, &port->flags);
+	spin_lock_irq(&uport->lock);
+	uport->flags &= ~UPF_INUSE_NORMAL;
+	spin_unlock_irq(&uport->lock);
 	clear_bit(ASYNCB_CLOSING, &port->flags);
 	spin_unlock_irqrestore(&port->lock, flags);
 	wake_up_interruptible(&port->open_wait);
@@ -1551,6 +1564,7 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 	int retval, line = tty->index;
 	struct uart_state *state = drv->state + line;
 	struct tty_port *port = &state->port;
+	struct uart_port *uport = state->uart_port;
 
 	pr_debug("uart_open(%d) called\n", line);
 
@@ -1567,10 +1581,19 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 	}
 
 	port->count++;
-	if (!state->uart_port || state->uart_port->flags & UPF_DEAD) {
+	if (!uport || uport->flags & UPF_DEAD) {
 		retval = -ENXIO;
 		goto err_dec_count;
 	}
+
+	spin_lock_irq(&uport->lock);
+	if (uport->flags & UPF_INUSE_DIRECT) {
+		spin_unlock_irq(&uport->lock);
+		retval = -EAGAIN;
+		goto err_dec_count;
+	}
+	uport->flags |= UPF_INUSE_NORMAL;
+	spin_unlock_irq(&uport->lock);
 
 	/*
 	 * Once we set tty->driver_data here, we are guaranteed that
@@ -1608,6 +1631,12 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 	mutex_unlock(&port->mutex);
 	if (retval == 0)
 		retval = tty_port_block_til_ready(port, tty, filp);
+
+	if (retval) {
+		spin_lock_irq(&uport->lock);
+		uport->flags &= UPF_INUSE_NORMAL;
+		spin_unlock_irq(&uport->lock);
+	}
 
 end:
 	return retval;
@@ -2464,6 +2493,13 @@ static const struct tty_port_operations uart_port_ops = {
 	.dtr_rts	= uart_dtr_rts,
 };
 
+/*
+ * Holds a list of poll-capable uart drivers, so that polled driver
+ * users can look them up.
+ */
+static LIST_HEAD(polled_list);
+static DEFINE_MUTEX(polled_list_lock);
+
 /**
  *	uart_register_polled - register a driver to be used as a polled device
  *	@drv: low level driver structure
@@ -2474,6 +2510,10 @@ static const struct tty_port_operations uart_port_ops = {
  */
 void uart_register_polled(struct uart_driver *drv)
 {
+	mutex_lock(&polled_list_lock);
+	list_add_tail(&drv->polled_link, &polled_list);
+	mutex_unlock(&polled_list_lock);
+
 #ifdef CONFIG_SERIAL_CORE_CONSOLE
 	if (drv->nr_pollable && drv->cons &&
 					!(drv->cons->flags & CON_ENABLED)) {
@@ -2500,6 +2540,9 @@ void uart_unregister_polled(struct uart_driver *drv)
 	if (drv->nr_pollable && drv->cons)
 		unregister_console(drv->cons);
 #endif
+	mutex_lock(&polled_list_lock);
+	list_del(&drv->polled_link);
+	mutex_unlock(&polled_list_lock);
 }
 EXPORT_SYMBOL(uart_unregister_polled);
 
@@ -2958,6 +3001,7 @@ EXPORT_SYMBOL(uart_match_port);
  */
 void uart_handle_dcd_change(struct uart_port *uport, unsigned int status)
 {
+	struct uart_state *state = uport->state;
 	struct tty_port *port = &uport->state->port;
 	struct tty_struct *tty = port->tty;
 	struct tty_ldisc *ld = tty ? tty_ldisc_ref(tty) : NULL;
@@ -2966,6 +3010,12 @@ void uart_handle_dcd_change(struct uart_port *uport, unsigned int status)
 		if (ld->ops->dcd_change)
 			ld->ops->dcd_change(tty, status);
 		tty_ldisc_deref(ld);
+	}
+
+	if (state->direct) {
+		if (state->direct->handle_dcd_change)
+			state->direct->handle_dcd_change(uport, status);
+		return;
 	}
 
 	uport->icount.dcd++;
@@ -2986,9 +3036,18 @@ EXPORT_SYMBOL_GPL(uart_handle_dcd_change);
  */
 void uart_handle_cts_change(struct uart_port *uport, unsigned int status)
 {
-	struct tty_port *port = &uport->state->port;
-	struct tty_struct *tty = port->tty;
 
+	struct uart_state *state = uport->state;
+	struct tty_port *port = &state->port;
+	struct tty_struct *tty;
+
+	if (state->direct) {
+		if (state->direct->handle_cts_change)
+			state->direct->handle_cts_change(uport, status);
+		return;
+	}
+
+	tty = port->tty;
 	uport->icount.cts++;
 
 	if (tty_port_cts_enabled(port)) {
@@ -3009,6 +3068,114 @@ void uart_handle_cts_change(struct uart_port *uport, unsigned int status)
 EXPORT_SYMBOL_GPL(uart_handle_cts_change);
 
 /**
+ *	uart_get_direct_port - Directly get a port for use
+ *	@name: The name to search for
+ *	@line: The line number to reserve
+ *
+ *	Find and reserve (if found) a serial port.  This is so device
+ *	drivers can directly reserve a serial port.
+ */
+struct uart_port *uart_get_direct_port(char *name, int line)
+{
+	struct uart_driver *drv;
+	struct uart_port *port = NULL;
+	unsigned long flags = 0;
+
+	mutex_lock(&polled_list_lock);
+	list_for_each_entry(drv, &polled_list, polled_link) {
+		if (strcmp(drv->dev_name, name) == 0) {
+			if (line < drv->nr_pollable
+						&& drv->pollable_ports[line])
+				port = drv->pollable_ports[line];
+			else
+				break;
+			if (!try_module_get(drv->owner)) {
+				port = NULL;
+				break;
+			}
+			spin_lock_irqsave(&port->lock, flags);
+			if (port->flags & PORT_INUSE) {
+				spin_unlock_irqrestore(&port->lock, flags);
+				module_put(drv->owner);
+				port = NULL;
+				break;
+			}
+			port->flags |= UPF_INUSE_DIRECT;
+			spin_unlock_irqrestore(&port->lock, flags);
+			break;
+		}
+	}
+	mutex_unlock(&polled_list_lock);
+
+	return port;
+}
+EXPORT_SYMBOL(uart_get_direct_port);
+
+/**
+ *	uart_put_direct_port - Release a port reserved for direct use.
+ *	@port: The port to release
+ *
+ *	Free a port that was previously returned by uart_get_direct_port.
+ *	If you specified force in the get, you should do so in the put.
+ */
+int uart_put_direct_port(struct uart_port *port)
+{
+	struct uart_driver *drv;
+	unsigned long flags = 0;
+	int i;
+	int retval = -EINVAL;
+
+	mutex_lock(&polled_list_lock);
+	list_for_each_entry(drv, &polled_list, polled_link) {
+		for (i = 0; i < drv->nr_pollable; i++) {
+			if (drv->pollable_ports[i] == port) {
+				spin_lock_irqsave(&port->lock, flags);
+				port->flags &= ~UPF_INUSE_DIRECT;
+				spin_unlock_irqrestore(&port->lock, flags);
+				module_put(drv->owner);
+				retval = 0;
+				goto out_unlock;
+			}
+		}
+	}
+ out_unlock:
+	mutex_unlock(&polled_list_lock);
+
+	return retval;
+}
+EXPORT_SYMBOL(uart_put_direct_port);
+
+/**
+ *	uart_direct_write - Write data as a direct serial user
+ *	@port: The port to write on
+ *	@buf: The data to write
+ *	@count: The number of bytes to write.
+ *
+ *	Write bytes to a serial port that is reserved with the
+ *	uart_get_direct_port() function.  This is non-blocking and
+ *	will return the number of bytes actually written.
+ */
+int
+uart_direct_write(struct uart_port *port, const unsigned char *buf, int count,
+		  int lock)
+{
+	struct circ_buf *circ;
+	unsigned long flags = 0; /* Keep us warning-free. */
+	int ret;
+
+	circ = &port->state->xmit;
+	if (lock)
+		spin_lock_irqsave(&port->lock, flags);
+	ret = uart_circ_write(circ, buf, count);
+	if (ret > 0)
+		port->ops->start_tx(port);
+	if (lock)
+		spin_unlock_irqrestore(&port->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL(uart_direct_write);
+
+/**
  * uart_insert_char - push a char to the uart layer
  *
  * User is responsible to call tty_flip_buffer_push when they are done with
@@ -3023,10 +3190,15 @@ EXPORT_SYMBOL_GPL(uart_handle_cts_change);
 void uart_insert_char(struct uart_port *port, unsigned int status,
 		 unsigned int overrun, unsigned int ch, unsigned int flag)
 {
-	struct tty_port *tport = &port->state->port;
+	struct uart_state *state = port->state;
+	struct tty_port *tport = &state->port;
 
-	if (!tty)
+	if (state->direct) {
+		if (state->direct->handle_char)
+			state->direct->handle_char(port, status, overrun,
+						   ch, flag);
 		return;
+	}
 
 	if ((status & port->ignore_status_mask & ~overrun) == 0)
 		if (tty_insert_flip_char(tport, ch, flag) == 0)
