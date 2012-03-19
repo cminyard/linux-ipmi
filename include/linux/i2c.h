@@ -122,6 +122,23 @@ extern s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client,
 					  const u8 *values);
 #endif /* I2C */
 
+/*
+ * Non-blocking interface.  The user should fill out the public
+ * portions of the entry structure.  All data in the entry structure
+ * should be guaranteed to be available until the handler callback is
+ * called with the entry.
+ */
+extern int i2c_non_blocking_op(struct i2c_client *client,
+			       struct i2c_op_q_entry *entry);
+
+/*
+ * Poll the i2c interface.  This should only be called in a situation
+ * where scheduling and interrupts are off.  You should put the amount
+ * of microseconds between calls in us_since_last_call.
+ */
+extern void i2c_poll(struct i2c_client *client,
+		     unsigned int us_since_last_call);
+
 /**
  * struct i2c_driver - represent an I2C device driver
  * @class: What kind of i2c device we instantiate (for detect)
@@ -395,6 +412,35 @@ struct i2c_algorithm {
 			   unsigned short flags, char read_write,
 			   u8 command, int size, union i2c_smbus_data *data);
 
+	/*
+	 * These are like the previous calls, but they will only start
+	 * the operation.  The poll call will be called periodically
+	 * to drive the operation of the bus.  Each of these calls
+	 * should set the result on an error, and set the timeout as
+	 * necessary.  Note that even interrupt driven drivers need to
+	 * poll so they can time out operations.  Note that all the
+	 * data structures passed in are guaranteed to be kept around
+	 * until the operation completes.  These may be called from
+	 * interrupt context.  If the start operation fails, these
+	 * should return an error.  They are called with the queue lock
+	 * held, so they should not call i2c_op_done().
+	 */
+	int (*master_start)(struct i2c_adapter    *adap,
+			    struct i2c_op_q_entry *entry);
+	int (*smbus_start)(struct i2c_adapter    *adap,
+			   struct i2c_op_q_entry *entry);
+	/*
+	 * us_since_last_poll is the amount of time since the last
+	 * time poll was called. Note that this may be *less* than the
+	 * time you requested, so always use this number and don't
+	 * assume it's the one you gave it.  This time is approximate
+	 * and is only guaranteed to be >= the time since the last
+	 * poll.  The value may be zero.
+	 */
+	void (*poll)(struct i2c_adapter *adap,
+		     struct i2c_op_q_entry *entry,
+		     unsigned int us_since_last_poll);
+
 	/* To determine what the adapter supports */
 	u32 (*functionality) (struct i2c_adapter *);
 };
@@ -537,6 +583,12 @@ static inline int i2c_check_functionality(struct i2c_adapter *adap, u32 func)
 static inline int i2c_adapter_id(struct i2c_adapter *adap)
 {
 	return adap->nr;
+}
+
+/* Is the interface capable of using the non-blocking interface? */
+static inline int i2c_non_blocking_capable(struct i2c_adapter *adap)
+{
+	return adap->algo->poll != NULL;
 }
 
 /**
@@ -762,6 +814,10 @@ struct i2c_op_q_entry {
 	/* Internals */
 	struct completion *start;
 	unsigned char     use_timer;
+#define I2C_OP_QUEUED		0
+#define I2C_OP_INITIALIZED	1
+#define I2C_OP_FINISHED		2
+	unsigned char	  state;
 	u8                pec;
 	u8                partial_pec;
 	void (*complete)(struct i2c_adapter    *adap,
