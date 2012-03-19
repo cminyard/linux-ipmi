@@ -14,3 +14,5 @@ obj-$(CONFIG_IPMI_SERIAL_DIRECT) += ipmi_serial_direct.o
 obj-$(CONFIG_IPMI_SERIAL_RADISYS_ASCII) += ipmi_serial_radisys_ascii.o
 obj-$(CONFIG_IPMI_WATCHDOG) += ipmi_watchdog.o
 obj-$(CONFIG_IPMI_POWEROFF) += ipmi_poweroff.o
+obj-$(CONFIG_IPMI_EMULATE_RADISYS) += ipmi_radisys.o
+obj-$(CONFIG_IPMI_EMULATE_IMB) += ipmi_imb.o
