@@ -840,6 +840,8 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 	rt_mutex_init(&adap->bus_lock);
 	mutex_init(&adap->userspace_clients_lock);
 	INIT_LIST_HEAD(&adap->userspace_clients);
+	spin_lock_init(&adap->q_lock);
+	INIT_LIST_HEAD(&adap->q);
 
 	/* Set default timeout to 1 second if not already set */
 	if (adap->timeout == 0)
@@ -1319,6 +1321,7 @@ static void i2c_transfer_entry(struct i2c_adapter *adap,
 	 */
 
 	entry->xfer_type = I2C_OP_I2C;
+	kref_init(&entry->usecount);
 	if (algo->master_xfer) {
 #ifdef DEBUG
 		int ret;
@@ -2164,6 +2167,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
+	kref_init(&entry->usecount);
 
 	entry->xfer_type = I2C_OP_SMBUS;
 	entry->smbus.addr = addr;
@@ -2215,6 +2219,82 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	return res;
 }
 EXPORT_SYMBOL(i2c_smbus_xfer);
+
+/* ----------------------------------------------------
+ * Entry handling
+ * ----------------------------------------------------
+ */
+
+/*
+ * Get the first entry off the head of the queue and lock it there.
+ * The entry is guaranteed to remain first in the list and the handler
+ * not be called until i2c_entry_put() is called.
+ */
+static struct i2c_op_q_entry *_i2c_entry_get(struct i2c_adapter *adap)
+{
+	struct i2c_op_q_entry *entry = NULL;
+
+	if (!list_empty(&adap->q)) {
+		struct list_head *link = adap->q.next;
+		entry = list_entry(link, struct i2c_op_q_entry, link);
+		kref_get(&entry->usecount);
+	}
+	pr_debug("_i2c_entry_get %p %p\n", adap, entry);
+	return entry;
+}
+
+struct i2c_op_q_entry *i2c_entry_get(struct i2c_adapter *adap)
+{
+	unsigned long flags;
+	struct i2c_op_q_entry *entry;
+
+	spin_lock_irqsave(&adap->q_lock, flags);
+	entry = _i2c_entry_get(adap);
+	spin_unlock_irqrestore(&adap->q_lock, flags);
+	return entry;
+}
+
+static void i2c_op_release(struct kref *ref)
+{
+	/*
+	 * Nothing to do here, all handling is from the kref_put
+	 * return code.
+	 */
+}
+
+void i2c_entry_put(struct i2c_adapter *adap,
+		   struct i2c_op_q_entry *entry)
+{
+	unsigned long flags;
+
+	pr_debug("i2c_put %p %p\n", adap, entry);
+
+	spin_lock_irqsave(&adap->q_lock, flags);
+	while (kref_put(&entry->usecount, i2c_op_release)) {
+		list_del(&entry->link);
+		spin_unlock_irqrestore(&adap->q_lock, flags);
+
+		if (entry->complete)
+			entry->complete(adap, entry);
+
+		entry->handler(entry);
+
+		spin_lock_irqsave(&adap->q_lock, flags);
+		entry = _i2c_entry_get(adap);
+		if (!entry)
+			break;
+		if (entry->start)
+			complete(entry->start);
+	}
+	spin_unlock_irqrestore(&adap->q_lock, flags);
+}
+
+void i2c_op_done(struct i2c_adapter *adap, struct i2c_op_q_entry *entry)
+{
+	pr_debug("i2c_op_done: %p %p\n", adap, entry);
+	i2c_entry_put(adap, entry);
+}
+EXPORT_SYMBOL(i2c_op_done);
 
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus main module");

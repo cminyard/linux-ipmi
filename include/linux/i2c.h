@@ -345,6 +345,37 @@ i2c_register_board_info(int busnum, struct i2c_board_info const *info,
 #endif /* I2C_BOARDINFO */
 
 /*
+ * About locking and the non-blocking interface.
+ *
+ * The poll operations are called single-threaded (along with the
+ * xxx_start operations), so if the driver is only polled then there
+ * is no need to do any locking.  If you are using interrupts, then
+ * the timer operations and interrupts can race and you need to lock
+ * appropriately.
+ *
+ * i2c_op_done() can be called multiple times on the same entry (as
+ * long as each one has a get operation).  This handles poll and
+ * interrupt races calling i2c_op_done().  It will do the right thing.
+ */
+
+/*
+ * Called from an non-blocking interface to get the current working
+ * entry.  Returns NULL if there is none.  This is primarily for
+ * interrupt handlers to determine what they should be working on.
+ * Note that if you call i2c_entry_get() and get a non-null entry, you
+ * must call i2c_entry_put() on it.
+ */
+struct i2c_op_q_entry *i2c_entry_get(struct i2c_adapter *adap);
+void i2c_entry_put(struct i2c_adapter *adap,
+		   struct i2c_op_q_entry *entry);
+
+/*
+ * Called from an non-blocking interface to report that an operation
+ * has completed.  Can be called from interrupt context.
+ */
+void i2c_op_done(struct i2c_adapter *adap, struct i2c_op_q_entry *entry);
+
+/*
  * The following structs are for those who like to implement new bus drivers:
  * i2c_algorithm is the interface to a class of hardware solutions which can
  * be addressed using the same bus algorithms - i.e. bit-banging or the PCF8584
@@ -379,6 +410,9 @@ struct i2c_adapter {
 
 	/* data fields that are valid for all devices	*/
 	struct rt_mutex bus_lock;
+
+	struct list_head q;
+	spinlock_t q_lock;
 
 	int timeout;			/* in jiffies */
 	int retries;
@@ -624,6 +658,7 @@ union i2c_smbus_data {
  */
 #define I2C_OP_I2C	0
 #define I2C_OP_SMBUS	1
+typedef void (*i2c_op_done_cb)(struct i2c_op_q_entry *entry);
 struct i2c_op_q_entry {
 	/*
 	 * The result will be set to the result of the operation when
@@ -641,6 +676,13 @@ struct i2c_op_q_entry {
 	 * Set to I2C_OP_I2C or I2C_OP_SMBUS depending on the transfer type.
 	 */
 	int            xfer_type;
+
+	/*
+	 * Handler may be called from interrupt context, so be
+	 * careful.
+	 */
+	i2c_op_done_cb handler;
+	void           *handler_data;
 
 	/*
 	 * Set up the i2c or smbus structure, depending on the transfer
@@ -680,10 +722,14 @@ struct i2c_op_q_entry {
 
 	/**************************************************************/
 	/* Internals */
+	struct completion *start;
 	u8                pec;
 	u8                partial_pec;
 	void (*complete)(struct i2c_adapter    *adap,
 			 struct i2c_op_q_entry *entry);
+
+	struct list_head link;
+	struct kref usecount;
 
 	/*
 	 * These are here for SMBus emulation over I2C.  I don't like
