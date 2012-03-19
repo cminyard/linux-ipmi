@@ -50,6 +50,17 @@ config IPMI_SI
 	 Currently, only KCS and SMIC are supported.  If
 	 you are using IPMI, you should probably say "y" here.
 
+config IPMI_SMB
+       tristate 'IPMI SMBus handler'
+       select I2C
+       help
+         Provides a driver for a SMBus interface to a BMC, meaning that you
+	 have a driver that must be accessed over an I2C bus instead of a
+	 standard interface.  This module requires I2C support.  Note that
+	 you might need some I2C changes if CONFIG_IPMI_PANIC_EVENT is
+	 enabled along with this, so the I2C driver knows to run to
+	 completion during sending a panic event.
+
 config IPMI_WATCHDOG
        tristate 'IPMI Watchdog Timer'
        help
