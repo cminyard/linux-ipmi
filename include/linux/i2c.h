@@ -35,6 +35,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>		/* for struct device_node */
 #include <linux/swab.h>		/* for swab16 */
+#include <linux/timer.h>
 
 extern struct bus_type i2c_bus_type;
 extern struct device_type i2c_adapter_type;
@@ -399,6 +400,20 @@ struct i2c_algorithm {
 };
 
 /*
+ * The timer has it's own separately allocated data structure because
+ * it needs to be able to exist even if the adapter is deleted (due to
+ * timer cancellation races).
+ */
+struct i2c_timer {
+	spinlock_t lock;
+	char deleted;
+	char running;
+	struct timer_list timer;
+	unsigned int next_call_time;
+	struct i2c_adapter *adapter;
+};
+
+/*
  * i2c_adapter is the structure used to identify a physical i2c bus along
  * with the access algorithms necessary to access it.
  */
@@ -413,6 +428,11 @@ struct i2c_adapter {
 
 	struct list_head q;
 	spinlock_t q_lock;
+
+	/*
+	 * Used to time non-blocking operations.
+	 */
+	struct i2c_timer *timer;
 
 	int timeout;			/* in jiffies */
 	int retries;
@@ -721,8 +741,27 @@ struct i2c_op_q_entry {
 	} smbus;
 
 	/**************************************************************/
+	/* Bus Interface */
+	/*
+	 * The bus interface must set call_again_us to the time in
+	 * microseconds until the next poll operation should be
+	 * called.  This *must* be set in the start operation
+	 * function.  The value may be changed in poll calls if the
+	 * bus interface needs different timeouts at different times.
+	 * The time_left and data can be used for anything the bus
+	 * interface likes.  data will be set to NULL before being
+	 * started; the bus interface must use that to tell if the
+	 * entry has been set up.  It should ignore poll operations on
+	 * entries that are not yet set up.
+	 */
+	unsigned int  call_again_us;
+	long          time_left;
+	void	      *data;
+
+	/**************************************************************/
 	/* Internals */
 	struct completion *start;
+	unsigned char     use_timer;
 	u8                pec;
 	u8                partial_pec;
 	void (*complete)(struct i2c_adapter    *adap,

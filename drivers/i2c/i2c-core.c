@@ -43,6 +43,7 @@
 
 #include "i2c-core.h"
 
+#define USEC_PER_JIFFIE (1000000 / HZ)
 
 /* core_lock protects i2c_adapter_idr, and guarantees
    that device detection, deletion of detected devices, and attach_adapter
@@ -842,6 +843,18 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 	INIT_LIST_HEAD(&adap->userspace_clients);
 	spin_lock_init(&adap->q_lock);
 	INIT_LIST_HEAD(&adap->q);
+	adap->timer = kmalloc(sizeof(*adap->timer), GFP_KERNEL);
+	if (!adap->timer) {
+		res = -ENOMEM;
+		goto out_list;
+	}
+
+	init_timer(&adap->timer->timer);
+	spin_lock_init(&adap->timer->lock);
+	adap->timer->deleted = 0;
+	adap->timer->running = 0;
+	adap->timer->next_call_time = 0;
+	adap->timer->adapter = adap;
 
 	/* Set default timeout to 1 second if not already set */
 	if (adap->timeout == 0)
@@ -1084,6 +1097,13 @@ int i2c_del_adapter(struct i2c_adapter *adap)
 	/* device name is gone after device_unregister */
 	dev_dbg(&adap->dev, "adapter [%s] unregistered\n", adap->name);
 
+	/* Stop the timer and free its memory. */
+	adap->timer->deleted = 1;
+	/* Timer can no longer be started now. */
+	del_timer_sync(&adap->timer->timer);
+	kfree(adap->timer);
+	adap->timer = NULL;
+
 	/* clean up the sysfs representation */
 	init_completion(&adap->dev_released);
 	device_unregister(&adap->dev);
@@ -1290,6 +1310,64 @@ static void __exit i2c_exit(void)
  */
 postcore_initcall(i2c_init);
 module_exit(i2c_exit);
+
+/* ----------------------------------------------------
+ * Timer operations
+ * ----------------------------------------------------
+ */
+static void i2c_handle_timer(unsigned long data);
+
+static void i2c_start_timer(struct i2c_adapter *adap,
+			    struct i2c_op_q_entry *entry)
+{
+	unsigned int wait_jiffies;
+	struct i2c_timer *t = adap->timer;
+	unsigned long flags;
+
+	wait_jiffies = ((entry->call_again_us + USEC_PER_JIFFIE - 1)
+			/ USEC_PER_JIFFIE);
+	if (wait_jiffies == 0)
+		wait_jiffies = 1;
+	/*
+	 * This won't be polled from the user code, so
+	 * start a timer to poll it.
+	 */
+	spin_lock_irqsave(&t->lock, flags);
+	if (!t->deleted && !t->running) {
+		t->timer.expires = jiffies + wait_jiffies;
+		t->timer.data = (unsigned long) t;
+		t->timer.function = i2c_handle_timer;
+		t->running = 1;
+		t->next_call_time = wait_jiffies * USEC_PER_JIFFIE;
+		add_timer(&t->timer);
+	}
+	spin_unlock_irqrestore(&t->lock, flags);
+}
+
+static void i2c_handle_timer(unsigned long data)
+{
+	struct i2c_timer      *t = (void *) data;
+	struct i2c_adapter    *adap;
+	unsigned long         flags;
+	struct i2c_op_q_entry *entry;
+
+	spin_lock_irqsave(&t->lock, flags);
+	adap = t->adapter;
+	t->running = 0;
+	spin_unlock_irqrestore(&t->lock, flags);
+
+	entry = i2c_entry_get(adap);
+	pr_debug("i2c_handle_timer: %p %p\n", adap, entry);
+	if (entry) {
+		/* Add poll here. */
+
+		spin_lock_irqsave(&adap->q_lock, flags);
+		if (entry->use_timer)
+			i2c_start_timer(adap, entry);
+		spin_unlock_irqrestore(&adap->q_lock, flags);
+		i2c_entry_put(adap, entry);
+	}
+}
 
 /* ----------------------------------------------------
  * the functional interface to the i2c busses.
