@@ -69,7 +69,7 @@
 #define SMBREV		0x0D6
 
 /* Other settings */
-#define MAX_TIMEOUT	500
+#define MAX_TIMEOUT_NS	500000000
 #define  ENABLE_INT9	0
 
 /* PIIX4 constants */
@@ -78,6 +78,8 @@
 #define PIIX4_BYTE_DATA		0x08
 #define PIIX4_WORD_DATA		0x0C
 #define PIIX4_BLOCK_DATA	0x14
+
+#define RETRY_TIME_NS	500000 /* Try every 500us minimum */
 
 /* insmod parameters */
 
@@ -361,66 +363,47 @@ static int piix4_setup_aux(struct pci_dev *PIIX4_dev,
 	return piix4_smba;
 }
 
-static int piix4_transaction(struct i2c_adapter *piix4_adapter)
+static void piix4_poll(struct i2c_adapter *piix4_adapter,
+		       struct i2c_op_q_entry *e,
+		       unsigned int ns_since_last_poll)
 {
 	struct i2c_piix4_adapdata *adapdata = i2c_get_adapdata(piix4_adapter);
 	unsigned short piix4_smba = adapdata->smba;
 	int temp;
-	int result = 0;
-	int timeout = 0;
+	int i;
 
-	dev_dbg(&piix4_adapter->dev, "Transaction (pre): CNT=%02x, CMD=%02x, "
-		"ADD=%02x, DAT0=%02x, DAT1=%02x\n", inb_p(SMBHSTCNT),
-		inb_p(SMBHSTCMD), inb_p(SMBHSTADD), inb_p(SMBHSTDAT0),
-		inb_p(SMBHSTDAT1));
-
-	/* Make sure the SMBus host is ready to start transmitting */
-	if ((temp = inb_p(SMBHSTSTS)) != 0x00) {
-		dev_dbg(&piix4_adapter->dev, "SMBus busy (%02x). "
-			"Resetting...\n", temp);
-		outb_p(temp, SMBHSTSTS);
-		if ((temp = inb_p(SMBHSTSTS)) != 0x00) {
-			dev_err(&piix4_adapter->dev, "Failed! (%02x)\n", temp);
-			return -EBUSY;
+	temp = inb_p(SMBHSTSTS);
+	if (temp & 0x01) {
+		e->time_left -= ns_since_last_poll;
+		if (e->time_left <= 0) {
+			dev_err(&piix4_adapter->dev, "SMBus Timeout!\n");
+			e->result = -EBUSY;
+			goto out_done;
 		} else {
-			dev_dbg(&piix4_adapter->dev, "Successful!\n");
+			/* Not done, return to restart the timer */
+			e->call_again_ns = RETRY_TIME_NS;
 		}
-	}
-
-	/* start the transaction by setting bit 6 */
-	outb_p(inb(SMBHSTCNT) | 0x040, SMBHSTCNT);
-
-	/* We will always wait for a fraction of a second! (See PIIX4 docs errata) */
-	if (srvrworks_csb5_delay) /* Extra delay for SERVERWORKS_CSB5 */
-		msleep(2);
-	else
-		msleep(1);
-
-	while ((++timeout < MAX_TIMEOUT) &&
-	       ((temp = inb_p(SMBHSTSTS)) & 0x01))
-		msleep(1);
-
-	/* If the SMBus is still busy, we give up */
-	if (timeout == MAX_TIMEOUT) {
-		dev_err(&piix4_adapter->dev, "SMBus Timeout!\n");
-		result = -ETIMEDOUT;
+		return;
 	}
 
 	if (temp & 0x10) {
-		result = -EIO;
+		e->result = -EIO;
 		dev_err(&piix4_adapter->dev, "Error: Failed bus transaction\n");
+		goto out_done;
 	}
 
 	if (temp & 0x08) {
-		result = -EIO;
+		e->result = -EIO;
 		dev_dbg(&piix4_adapter->dev, "Bus collision! SMBus may be "
 			"locked until next hard reset. (sorry!)\n");
 		/* Clock stops and slave is stuck in mid-transmission */
+		goto out_done;
 	}
 
 	if (temp & 0x04) {
-		result = -ENXIO;
+		e->result = -ENODEV;
 		dev_dbg(&piix4_adapter->dev, "Error: no response!\n");
+		goto out_done;
 	}
 
 	if (inb_p(SMBHSTSTS) != 0x00)
@@ -434,97 +417,130 @@ static int piix4_transaction(struct i2c_adapter *piix4_adapter)
 		"ADD=%02x, DAT0=%02x, DAT1=%02x\n", inb_p(SMBHSTCNT),
 		inb_p(SMBHSTCMD), inb_p(SMBHSTADD), inb_p(SMBHSTDAT0),
 		inb_p(SMBHSTDAT1));
-	return result;
+
+	if ((e->smbus.read_write == I2C_SMBUS_WRITE)
+	    || (e->smbus.size == PIIX4_QUICK))
+		goto out_done;
+
+	switch (e->smbus.size) {
+	case PIIX4_BYTE:
+	case PIIX4_BYTE_DATA:
+		e->smbus.data->byte = inb_p(SMBHSTDAT0);
+		break;
+	case PIIX4_WORD_DATA:
+		e->smbus.data->word = (inb_p(SMBHSTDAT0)
+				       + (inb_p(SMBHSTDAT1) << 8));
+		break;
+	case PIIX4_BLOCK_DATA:
+		e->smbus.data->block[0] = inb_p(SMBHSTDAT0);
+		if (e->smbus.data->block[0] == 0 ||
+			      e->smbus.data->block[0] > I2C_SMBUS_BLOCK_MAX) {
+			e->result = -EPROTO;
+			goto out_done;
+		}
+		i = inb_p(SMBHSTCNT);	/* Reset SMBBLKDAT */
+		for (i = 1; i <= e->smbus.data->block[0]; i++)
+			e->smbus.data->block[i] = inb_p(SMBBLKDAT);
+		break;
+	}
+
+ out_done:
+	i2c_op_done(piix4_adapter, e);
 }
 
 /* Return negative errno on error. */
-static s32 piix4_access(struct i2c_adapter * adap, u16 addr,
-		 unsigned short flags, char read_write,
-		 u8 command, int size, union i2c_smbus_data * data)
+static int piix4_smbus_start(struct i2c_adapter *piix4_adapter,
+			     struct i2c_op_q_entry *e)
 {
-	struct i2c_piix4_adapdata *adapdata = i2c_get_adapdata(adap);
+	struct i2c_piix4_adapdata *adapdata = i2c_get_adapdata(piix4_adapter);
 	unsigned short piix4_smba = adapdata->smba;
 	int i, len;
-	int status;
+	int temp;
 
-	switch (size) {
+	switch (e->smbus.size) {
 	case I2C_SMBUS_QUICK:
-		outb_p((addr << 1) | read_write,
-		       SMBHSTADD);
-		size = PIIX4_QUICK;
+		outb_p((e->smbus.addr << 1) | e->smbus.read_write, SMBHSTADD);
+		e->smbus.size = PIIX4_QUICK;
 		break;
 	case I2C_SMBUS_BYTE:
-		outb_p((addr << 1) | read_write,
-		       SMBHSTADD);
-		if (read_write == I2C_SMBUS_WRITE)
-			outb_p(command, SMBHSTCMD);
-		size = PIIX4_BYTE;
+		outb_p((e->smbus.addr << 1) | e->smbus.read_write, SMBHSTADD);
+		if (e->smbus.read_write == I2C_SMBUS_WRITE)
+			outb_p(e->smbus.command, SMBHSTCMD);
+		e->smbus.size = PIIX4_BYTE;
 		break;
 	case I2C_SMBUS_BYTE_DATA:
-		outb_p((addr << 1) | read_write,
-		       SMBHSTADD);
-		outb_p(command, SMBHSTCMD);
-		if (read_write == I2C_SMBUS_WRITE)
-			outb_p(data->byte, SMBHSTDAT0);
-		size = PIIX4_BYTE_DATA;
+		outb_p((e->smbus.addr << 1) | e->smbus.read_write, SMBHSTADD);
+		outb_p(e->smbus.command, SMBHSTCMD);
+		if (e->smbus.read_write == I2C_SMBUS_WRITE)
+			outb_p(e->smbus.data->byte, SMBHSTDAT0);
+		e->smbus.size = PIIX4_BYTE_DATA;
 		break;
 	case I2C_SMBUS_WORD_DATA:
-		outb_p((addr << 1) | read_write,
-		       SMBHSTADD);
-		outb_p(command, SMBHSTCMD);
-		if (read_write == I2C_SMBUS_WRITE) {
-			outb_p(data->word & 0xff, SMBHSTDAT0);
-			outb_p((data->word & 0xff00) >> 8, SMBHSTDAT1);
+		outb_p((e->smbus.addr << 1) | e->smbus.read_write, SMBHSTADD);
+		outb_p(e->smbus.command, SMBHSTCMD);
+		if (e->smbus.read_write == I2C_SMBUS_WRITE) {
+			outb_p(e->smbus.data->word & 0xff, SMBHSTDAT0);
+			outb_p((e->smbus.data->word & 0xff00) >> 8,
+			       SMBHSTDAT1);
 		}
-		size = PIIX4_WORD_DATA;
+		e->smbus.size = PIIX4_WORD_DATA;
 		break;
 	case I2C_SMBUS_BLOCK_DATA:
-		outb_p((addr << 1) | read_write,
-		       SMBHSTADD);
-		outb_p(command, SMBHSTCMD);
-		if (read_write == I2C_SMBUS_WRITE) {
-			len = data->block[0];
+		outb_p((e->smbus.addr << 1) | e->smbus.read_write, SMBHSTADD);
+		outb_p(e->smbus.command, SMBHSTCMD);
+		if (e->smbus.read_write == I2C_SMBUS_WRITE) {
+			len = e->smbus.data->block[0];
 			if (len == 0 || len > I2C_SMBUS_BLOCK_MAX)
 				return -EINVAL;
 			outb_p(len, SMBHSTDAT0);
 			i = inb_p(SMBHSTCNT);	/* Reset SMBBLKDAT */
 			for (i = 1; i <= len; i++)
-				outb_p(data->block[i], SMBBLKDAT);
+				outb_p(e->smbus.data->block[i], SMBBLKDAT);
 		}
-		size = PIIX4_BLOCK_DATA;
+		e->smbus.size = PIIX4_BLOCK_DATA;
 		break;
 	default:
-		dev_warn(&adap->dev, "Unsupported transaction %d\n", size);
+		dev_warn(&piix4_adapter->dev, "Unsupported transaction %d\n",
+			 e->smbus.size);
 		return -EOPNOTSUPP;
 	}
 
-	outb_p((size & 0x1C) + (ENABLE_INT9 & 1), SMBHSTCNT);
+	outb_p((e->smbus.size & 0x1C) + (ENABLE_INT9 & 1), SMBHSTCNT);
 
-	status = piix4_transaction(adap);
-	if (status)
-		return status;
+	dev_dbg(&piix4_adapter->dev, "Transaction (pre): CNT=%02x, CMD=%02x, "
+		"ADD=%02x, DAT0=%02x, DAT1=%02x\n", inb_p(SMBHSTCNT),
+		inb_p(SMBHSTCMD), inb_p(SMBHSTADD), inb_p(SMBHSTDAT0),
+		inb_p(SMBHSTDAT1));
 
-	if ((read_write == I2C_SMBUS_WRITE) || (size == PIIX4_QUICK))
-		return 0;
-
-
-	switch (size) {
-	case PIIX4_BYTE:
-	case PIIX4_BYTE_DATA:
-		data->byte = inb_p(SMBHSTDAT0);
-		break;
-	case PIIX4_WORD_DATA:
-		data->word = inb_p(SMBHSTDAT0) + (inb_p(SMBHSTDAT1) << 8);
-		break;
-	case PIIX4_BLOCK_DATA:
-		data->block[0] = inb_p(SMBHSTDAT0);
-		if (data->block[0] == 0 || data->block[0] > I2C_SMBUS_BLOCK_MAX)
-			return -EPROTO;
-		i = inb_p(SMBHSTCNT);	/* Reset SMBBLKDAT */
-		for (i = 1; i <= data->block[0]; i++)
-			data->block[i] = inb_p(SMBBLKDAT);
-		break;
+	/* Make sure the SMBus host is ready to start transmitting */
+	temp = inb_p(SMBHSTSTS);
+	if (temp != 0x00) {
+		dev_dbg(&piix4_adapter->dev, "SMBus busy (%02x). "
+			"Resetting...\n", temp);
+		outb_p(temp, SMBHSTSTS);
+		temp = inb_p(SMBHSTSTS);
+		if (temp != 0x00) {
+			dev_err(&piix4_adapter->dev, "Failed! (%02x)\n", temp);
+			return -EBUSY;
+		} else {
+			dev_dbg(&piix4_adapter->dev, "Successfull!\n");
+		}
 	}
+
+	/* start the transaction by setting bit 6 */
+	outb_p(inb(SMBHSTCNT) | 0x040, SMBHSTCNT);
+
+	/* We will always wait for a fraction of a second! (See PIIX4
+	   docs errata), at least 1 jiffie (force 2 jiffies since we
+	   might be at the end of a jiffie).  So we don't check if it
+	   is done now. */
+	if (srvrworks_csb5_delay) /* Extra delay for SERVERWORKS_CSB5 */
+		e->call_again_ns = 3 * (1000000000 / HZ);
+	else
+		e->call_again_ns = 2 * (1000000000 / HZ);
+	e->time_left = MAX_TIMEOUT_NS;
+	e->use_timer = 1;
+
 	return 0;
 }
 
@@ -536,7 +552,8 @@ static u32 piix4_func(struct i2c_adapter *adapter)
 }
 
 static const struct i2c_algorithm smbus_algorithm = {
-	.smbus_xfer	= piix4_access,
+	.smbus_start	= piix4_smbus_start,
+	.poll           = piix4_poll,
 	.functionality	= piix4_func,
 };
 
