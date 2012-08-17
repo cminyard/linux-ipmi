@@ -606,20 +606,6 @@ static int i801_block_transaction(struct i801_priv *priv,
 				  int command, int hwpec)
 {
 	int result = 0;
-	unsigned char hostc;
-
-	if (command == I2C_SMBUS_I2C_BLOCK_DATA) {
-		if (read_write == I2C_SMBUS_WRITE) {
-			/* set I2C_EN bit in configuration register */
-			pci_read_config_byte(priv->pci_dev, SMBHSTCFG, &hostc);
-			pci_write_config_byte(priv->pci_dev, SMBHSTCFG,
-					      hostc | SMBHSTCFG_I2C_EN);
-		} else if (!(priv->features & FEATURE_I2C_BLOCK_READ)) {
-			dev_err(&priv->pci_dev->dev,
-				"I2C block read is unsupported!\n");
-			return -EOPNOTSUPP;
-		}
-	}
 
 	if (read_write == I2C_SMBUS_WRITE
 	 || command == I2C_SMBUS_I2C_BLOCK_DATA) {
@@ -646,11 +632,6 @@ static int i801_block_transaction(struct i801_priv *priv,
 							     read_write,
 							     command);
 
-	if (command == I2C_SMBUS_I2C_BLOCK_DATA
-	 && read_write == I2C_SMBUS_WRITE) {
-		/* restore saved configuration register value */
-		pci_write_config_byte(priv->pci_dev, SMBHSTCFG, hostc);
-	}
 	return result;
 }
 
@@ -664,6 +645,7 @@ static s32 i801_access(struct i2c_adapter *adap, u16 addr,
 	int ret, xact = 0;
 	struct i801_priv *priv = i2c_get_adapdata(adap);
 	int result;
+	int hostc = -1;
 
 	hwpec = (priv->features & FEATURE_SMBUS_PEC) && (flags & I2C_CLIENT_PEC)
 		&& size != I2C_SMBUS_QUICK
@@ -711,9 +693,19 @@ static s32 i801_access(struct i2c_adapter *adap, u16 addr,
 		 * bit should be cleared here, even when reading */
 		outb_p((addr & 0x7f) << 1, SMBHSTADD(priv));
 		if (read_write == I2C_SMBUS_READ) {
+			unsigned char thostc;
 			/* NB: page 240 of ICH5 datasheet also shows
 			 * that DATA1 is the cmd field when reading */
 			outb_p(command, SMBHSTDAT1(priv));
+			/* set I2C_EN bit in configuration register */
+			pci_read_config_byte(priv->pci_dev, SMBHSTCFG, &thostc);
+			pci_write_config_byte(priv->pci_dev, SMBHSTCFG,
+					      thostc | SMBHSTCFG_I2C_EN);
+			hostc = thostc;
+		} else if (!(priv->features & FEATURE_I2C_BLOCK_READ)) {
+			dev_err(&priv->pci_dev->dev,
+				"I2C block read is unsupported!\n");
+			return -EOPNOTSUPP;
 		} else
 			outb_p(command, SMBHSTCMD(priv));
 		block = 1;
@@ -748,6 +740,9 @@ static s32 i801_access(struct i2c_adapter *adap, u16 addr,
 	if (hwpec || block)
 		outb_p(inb_p(SMBAUXCTL(priv)) &
 		       ~(SMBAUXCTL_CRC | SMBAUXCTL_E32B), SMBAUXCTL(priv));
+
+	if (hostc >= 0)
+		pci_write_config_byte(priv->pci_dev, SMBHSTCFG, hostc);
 
 	if (block)
 		return ret;
