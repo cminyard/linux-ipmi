@@ -232,12 +232,8 @@ struct i801_priv {
 	unsigned int features;
 
 	/* isr/timer processing */
-	wait_queue_head_t waitq;
-	u8 status;
+	int status;
 	u8 xact_extra; /* Used to set INTREN if irqs enabled, and HWPEC */
-	struct hrtimer timer;
-	long timeout;
-	int retries;
 	int done;
 	spinlock_t lock;
 
@@ -246,6 +242,7 @@ struct i801_priv {
 	u8 xact;
 	bool is_read;
 	int byte_by_byte;
+	struct tasklet_struct byte_tasklet;
 	int block;
 	int count;
 	int hostc;
@@ -285,7 +282,7 @@ MODULE_PARM_DESC(disable_features, "Disable selected driver features:\n"
 	"\t\t  0x08  disable the I2C block read functionality\n"
 	"\t\t  0x10  don't use interrupts ");
 
-static void i801_op_done(struct i801_priv *priv);
+static void i801_op_done(struct i801_priv *priv, struct i2c_op_q_entry *e);
 
 static void i801_write_block(struct i801_priv *priv, union i2c_smbus_data *data)
 {
@@ -317,6 +314,9 @@ static int i801_terminate_transaction(struct i801_priv *priv)
 	int status, ret = 0, i;
 
 	dev_dbg(&priv->pci_dev->dev, "Terminating the current operation\n");
+
+	/* Make sure interrupts are off. */
+	outb_p(inb_p(SMBHSTCNT(priv)) | ~SMBHSTCNT_INTREN, SMBHSTCNT(priv));
 
 	/* Flush the input buffer */
 	for (i = 0; i < 32; i++)
@@ -382,8 +382,6 @@ static int i801_check_pre(struct i801_priv *priv)
 static int i801_check_post(struct i801_priv *priv)
 {
 	int result = 0;
-
-	hrtimer_cancel(&priv->timer);
 
 	/*
 	 * If the SMBus is still busy, we give up
@@ -470,6 +468,16 @@ static void i801_block_transaction_by_block(struct i801_priv *priv)
 	i801_transaction(priv, I801_BLOCK_DATA);
 }
 
+static void i801_next_byte_tasklet(unsigned long tdata)
+{
+	struct i801_priv *priv = (struct i801_priv *) tdata;
+
+	/* Clear BYTE_DONE to continue with next byte */
+	outb_p(SMBHSTSTS_BYTE_DONE, SMBHSTSTS(priv));
+	if (priv->features & FEATURE_IRQ)
+		enable_irq(priv->pci_dev->irq);
+}
+
 static void i801_byte_done(struct i801_priv *priv)
 {
 	u8 *data = &priv->data->block[1];
@@ -508,15 +516,16 @@ static void i801_byte_done(struct i801_priv *priv)
 		/* Write next byte, except for IRQ after last byte */
 		outb_p(data[++priv->count], SMBBLKDAT(priv));
 	}
-
-	/* Clear BYTE_DONE to continue with next byte */
-	outb_p(SMBHSTSTS_BYTE_DONE, SMBHSTSTS(priv));
 }
 
 static int i801_check(struct i801_priv *priv, u8 status)
 {
-	if (status & SMBHSTSTS_BYTE_DONE)
+	bool finish_byte = false;
+
+	if (status & SMBHSTSTS_BYTE_DONE) {
 		i801_byte_done(priv);
+		finish_byte = true;
+	}
 
 	/*
 	 * Clear irq sources and report transaction result.
@@ -524,38 +533,24 @@ static int i801_check(struct i801_priv *priv, u8 status)
 	 */
 	status &= SMBHSTSTS_INTR | STATUS_ERROR_FLAGS;
 	if (status) {
+		struct i2c_op_q_entry *e = i2c_entry_get(&priv->adapter);
+
+		if (finish_byte)
+			outb_p(SMBHSTSTS_BYTE_DONE, SMBHSTSTS(priv));
 		outb_p(status, SMBHSTSTS(priv));
 		priv->status |= status;
-		i801_op_done(priv);
-		return 1;
-	}
-	return 0;
-}
-
-static enum hrtimer_restart i801_timeout(struct hrtimer *hrtimer)
-{
-	struct i801_priv *priv = container_of(hrtimer, struct i801_priv, timer);
-	u8 status = inb_p(SMBHSTSTS(priv));
-	enum hrtimer_restart ret = HRTIMER_NORESTART;
-	unsigned long flags;
-
-	spin_lock_irqsave(&priv->lock, flags);
-	if (!priv->done && !i801_check(priv, status)) {
-		priv->retries--;
-		if (priv->retries > 0) {
-			hrtimer_set_expires_range(&priv->timer,
-				ktime_add_ns(ktime_get(), priv->timeout),
-				ns_to_ktime(I801_TIMEOUT_DELTA_NS));
-			ret = HRTIMER_RESTART;
-		} else {
-			dev_dbg(&priv->pci_dev->dev, "timeout, status = %02x\n",
-				status);
-			priv->status = -1;
-			i801_op_done(priv);
+		if (e) {
+			i801_op_done(priv, e);
+			i2c_entry_put(e);
 		}
+		return 1;
+	} else if (finish_byte) {
+		if (priv->features & FEATURE_IRQ)
+			disable_irq_nosync(priv->pci_dev->irq);
+		tasklet_schedule(&priv->byte_tasklet);
 	}
-	spin_unlock_irqrestore(&priv->lock, flags);
-	return ret;
+
+	return 0;
 }
 
 /*
@@ -566,7 +561,7 @@ static enum hrtimer_restart i801_timeout(struct hrtimer *hrtimer)
  *      DEV_ERR - Invalid command, NAK or communication timeout
  *      BUS_ERR - SMI# transaction collision
  *      FAILED - transaction was canceled due to a KILL request
- *    When any of these occur, update ->status and wake up the waitq.
+ *    When any of these occur, update ->status and handle it.
  *    ->status must be cleared before kicking off the next transaction.
  *
  * 2) For byte-by-byte (I2C read/write) transactions, one BYTE_DONE interrupt
@@ -577,6 +572,7 @@ static irqreturn_t i801_isr(int irq, void *dev_id)
 	struct i801_priv *priv = dev_id;
 	u16 pcists;
 	u8 status;
+	unsigned long flags;
 
 	/* Confirm this is our interrupt */
 	pci_read_config_word(priv->pci_dev, SMBPCISTS, &pcists);
@@ -584,9 +580,9 @@ static irqreturn_t i801_isr(int irq, void *dev_id)
 		return IRQ_NONE;
 
 	status = inb_p(SMBHSTSTS(priv));
-	spin_lock(&priv->lock);
+	spin_lock_irqsave(&priv->lock, flags);
 	i801_check(priv, status);
-	spin_unlock(&priv->lock);
+	spin_unlock_irqrestore(&priv->lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -743,30 +739,56 @@ static s32 i801_setup(struct i801_priv *priv, u16 addr, u8 command, int size)
 	return 0;
 }
 
-static void i801_op_done(struct i801_priv *priv)
+static void i801_op_done(struct i801_priv *priv, struct i2c_op_q_entry *e)
 {
+	if (priv->done)
+		return;
 	priv->done = 1;
-	wake_up(&priv->waitq);
+	e->result = i801_check_post(priv);
+	i2c_op_done(e);
+}
+
+static void i801_poll(struct i2c_adapter *adap,
+		      struct i2c_op_q_entry *e,
+		      unsigned int ns_since_last_poll)
+{
+	struct i801_priv *priv = i2c_get_adapdata(adap);
+	unsigned long flags;
+	u8 status = inb_p(SMBHSTSTS(priv));
+
+	spin_lock_irqsave(&priv->lock, flags);
+	if (!priv->done && !i801_check(priv, status)) {
+		e->time_left -= ns_since_last_poll;
+		if (e->time_left > 0) {
+			e->call_again_ns = I801_TIMEOUT_NS;
+		} else {
+			dev_dbg(&priv->pci_dev->dev, "timeout, status = %02x\n",
+				status);
+			priv->status = -1;
+			i801_op_done(priv, e);
+		}
+	}
+	spin_unlock_irqrestore(&priv->lock, flags);
 }
 
 /* Return negative errno on error. */
-static s32 i801_access(struct i2c_adapter *adap, u16 addr,
-		       unsigned short flags, char read_write, u8 command,
-		       int size, union i2c_smbus_data *data)
+static s32 i801_start(struct i2c_adapter *adap,
+		      struct i2c_op_q_entry *e)
 {
 	struct i801_priv *priv = i2c_get_adapdata(adap);
 	int result;
 
-	priv->is_read = (read_write == I2C_SMBUS_READ);
+	priv->is_read = (e->smbus.read_write == I2C_SMBUS_READ);
 	priv->byte_by_byte = 0;
 	priv->done = 0;
 	priv->block = 0;
 	priv->xact = 0;
 	priv->hostc = -1;
-	priv->data = data;
+	priv->data = e->smbus.data;
 	priv->status = 0;
 
-	result = i801_setup(priv, addr, command, size);
+	result = i801_setup(priv, e->smbus.addr, e->smbus.command,
+			    e->smbus.size);
 	if (result < 0)
 		return result;
 
@@ -777,37 +799,25 @@ static s32 i801_access(struct i2c_adapter *adap, u16 addr,
 	priv->xact_extra &= ~SMBHSTCNT_PEC_EN;
 	if (priv->block) {
 		int hwpec = (priv->features & FEATURE_SMBUS_PEC) &&
-			(flags & I2C_CLIENT_PEC)
-			&& size != I2C_SMBUS_QUICK
-			&& size != I2C_SMBUS_I2C_BLOCK_DATA;
+			(e->smbus.flags & I2C_CLIENT_PEC)
+			&& e->smbus.size != I2C_SMBUS_QUICK
+			&& e->smbus.size != I2C_SMBUS_I2C_BLOCK_DATA;
 
-		i801_block_transaction(priv, size, hwpec);
+		i801_block_transaction(priv, e->smbus.size, hwpec);
 	} else {
 		outb_p(inb_p(SMBAUXCTL(priv)) & (~SMBAUXCTL_CRC),
 		       SMBAUXCTL(priv));
 		i801_transaction(priv, priv->xact);
 	}
 
-	if (priv->features & FEATURE_IRQ) {
-		priv->timeout = I801_TIMEOUT_NS * MAX_RETRIES;
-		priv->retries = 1;
-	} else {
-		priv->timeout = I801_TIMEOUT_NS;
-		priv->retries = MAX_RETRIES;
-	}
+	e->time_left = I801_TIMEOUT_NS * MAX_RETRIES;
+	if (priv->features & FEATURE_IRQ)
+		e->call_again_ns = I801_TIMEOUT_NS * MAX_RETRIES;
+	else
+		e->call_again_ns = I801_TIMEOUT_NS;
+	e->use_timer = 1;
 
-	hrtimer_start_range_ns(&priv->timer,
-			       ktime_add_ns(ktime_get(), priv->timeout),
-			       I801_TIMEOUT_DELTA_NS,
-			       HRTIMER_MODE_ABS);
-
-	result = wait_event_timeout(priv->waitq, priv->status, adap->timeout);
-	if (!result) {
-		priv->status = -ETIMEDOUT;
-		dev_warn(&priv->pci_dev->dev,
-			 "Timeout waiting for interrupt!\n");
-	}
-	return i801_check_post(priv);
+	return 0;
 }
 
 
@@ -824,7 +834,8 @@ static u32 i801_func(struct i2c_adapter *adapter)
 }
 
 static const struct i2c_algorithm smbus_algorithm = {
-	.smbus_xfer	= i801_access,
+	.smbus_start	= i801_start,
+	.poll		= i801_poll,
 	.functionality	= i801_func,
 };
 
@@ -1262,8 +1273,8 @@ static int i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	ACPI_COMPANION_SET(&priv->adapter.dev, ACPI_COMPANION(&dev->dev));
 	priv->adapter.retries = 3;
 	spin_lock_init(&priv->lock);
-	hrtimer_init(&priv->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	priv->timer.function = i801_timeout;
+	tasklet_init(&priv->byte_tasklet, i801_next_byte_tasklet,
+		     (unsigned long) priv);
 
 	priv->pci_dev = dev;
 	switch (dev->device) {
@@ -1359,8 +1370,6 @@ static int i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		outb_p(inb_p(SMBAUXCTL(priv)) &
 		       ~(SMBAUXCTL_CRC | SMBAUXCTL_E32B), SMBAUXCTL(priv));
 
-	init_waitqueue_head(&priv->waitq);
-
 	/* Default timeout in interrupt mode: 200 ms */
 	priv->adapter.timeout = HZ / 5;
 
@@ -1424,7 +1433,6 @@ static void i801_remove(struct pci_dev *dev)
 
 	platform_device_unregister(priv->tco_pdev);
 
-	hrtimer_cancel(&priv->timer);
 	kfree(priv);
 	/*
 	 * do not call pci_disable_device(dev) since it can cause hard hangs on
