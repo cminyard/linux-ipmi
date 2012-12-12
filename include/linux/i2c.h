@@ -577,4 +577,120 @@ static inline struct i2c_adapter *of_find_i2c_adapter_by_node(struct device_node
 }
 #endif /* CONFIG_OF */
 
+#if defined(CONFIG_I2C) || defined(CONFIG_I2C_MODULE)
+/*
+ * Hold an I2C operation to perform, and used to pass data around.
+ */
+#define I2C_OP_I2C	0
+#define I2C_OP_SMBUS	1
+typedef void (*i2c_op_done_cb)(struct i2c_op_q_entry *entry);
+struct i2c_op_q_entry {
+	/*
+	 * The result will be set to the result of the operation when
+	 * it completes.
+	 */
+	s32 result;
+
+	/**************************************************************/
+	/*
+	 * Public interface.  The user should set these up (and the
+	 * proper structure below).
+	 */
+
+	/*
+	 * Set to I2C_OP_I2C or I2C_OP_SMBUS depending on the transfer type.
+	 */
+	int            xfer_type;
+
+	/*
+	 * Handler may be called from interrupt context, so be
+	 * careful.
+	 */
+	i2c_op_done_cb handler;
+	void           *handler_data;
+
+	/*
+	 * Set up the i2c or smbus structure, depending on the transfer
+	 * type.
+	 *
+	 * Note that i2c and smbus are not in a union because an smbus
+	 * operation may be converted into an i2c operation (thus both
+	 * structures will be used).  The data in these may be changed
+	 * by the driver.
+	 */
+	struct {
+		struct i2c_msg *msgs;
+		int num;
+	} i2c;
+	struct {
+		/*
+		 * Addr and flags are filled in by the non-blocking
+		 * send routine that takes a client.
+		 */
+		u16 addr;
+		unsigned short flags;
+
+		char read_write;
+		u8 command;
+
+		/*
+		 * Note that the size is *not* the length of the data.
+		 * It is the transaction type, like I2C_SMBUS_QUICK
+		 * and the ones after that below.  If this is a block
+		 * transaction, the length of the rest of the data is
+		 * in the first byte of the data, for both transmit
+		 * and receive.
+		 */
+		int size;
+		union i2c_smbus_data *data;
+	} smbus;
+
+	/**************************************************************/
+	/* Bus Interface */
+	/*
+	 * The bus interface must set call_again_ns to the time in
+	 * nanoseconds until the next poll operation should be
+	 * called.  This *must* be set in the start operation
+	 * function.  The value may be changed in poll calls if the
+	 * bus interface needs different timeouts at different times.
+	 * The time_left and data can be used for anything the bus
+	 * interface likes.  data will be set to NULL before being
+	 * started; the bus interface must use that to tell if the
+	 * entry has been set up.  It should ignore poll operations on
+	 * entries that are not yet set up.
+	 */
+	unsigned long call_again_ns;
+	long          time_left;
+	void	      *data;
+
+	/**************************************************************/
+	/* Internals */
+	struct completion done;
+	unsigned long     end_jiffies;
+	unsigned int      tries;
+	unsigned char     use_timer;
+
+#define I2C_OP_QUEUED		0
+#define I2C_OP_INITIALIZED	1
+#define I2C_OP_FINISHED		2
+	unsigned char	  state;
+	u8                pec;
+	u8                partial_pec;
+	void (*complete)(struct i2c_adapter    *adap,
+			 struct i2c_op_q_entry *entry);
+
+	struct list_head link;
+	struct kref usecount;
+
+	/*
+	 * These are here for SMBus emulation over I2C.  I don't like
+	 * them taking this much room in the data structure, but they
+	 * need to be available in this case.
+	 */
+	unsigned char msgbuf0[I2C_SMBUS_BLOCK_MAX + 3];
+	unsigned char msgbuf1[I2C_SMBUS_BLOCK_MAX + 2];
+	struct i2c_msg msg[2];
+};
+
+#endif /* I2C */
 #endif /* _LINUX_I2C_H */
