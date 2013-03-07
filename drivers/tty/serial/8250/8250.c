@@ -2700,6 +2700,7 @@ static void serial8250_poll_shutdown(struct uart_port *port,
 {
 	struct uart_8250_port *up = (struct uart_8250_port *) port;
 
+	wait_for_xmitr(up, BOTH_EMPTY);
 	serial_out(up, UART_IER, pflags);
 
 	/*
