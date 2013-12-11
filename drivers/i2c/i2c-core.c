@@ -1583,6 +1583,7 @@ static void i2c_init_entry(struct i2c_adapter *adap,
 	entry->end_jiffies = jiffies + adap->timeout;
 	entry->tries = 0;
 	kref_init(&entry->usecount);
+	entry->handler = NULL;
 }
 
 static void i2c_wait_done(struct i2c_op_q_entry *entry)
@@ -1598,7 +1599,6 @@ static void i2c_perform_op_wait(struct i2c_adapter *adap,
 	int ret = 0;
 
 	pr_debug("i2c_perform_op_wait %p %p\n", adap, entry);
-	i2c_init_entry(adap, entry);
 	entry->handler = i2c_wait_done;
 
 	spin_lock_irqsave(&adap->q_lock, flags);
@@ -1649,9 +1649,10 @@ static void i2c_transfer_entry(struct i2c_adapter *adap,
 			(entry->i2c.msgs[ret].flags & I2C_M_RD ?
 			 'R' : 'W'),
 			entry->i2c.msgs[ret].addr, entry->i2c.msgs[ret].len,
-			(msgs[ret].flags & I2C_M_RECV_LEN) ? "+" : "");
+			(entry->i2c.msgs[ret].flags & I2C_M_RECV_LEN) ? "+" : "");
 	}
 #endif
+	i2c_init_entry(adap, entry);
 	if (adap->algo->master_start)
 		i2c_perform_op_wait(adap, entry);
 	else if (adap->algo->master_xfer) {
@@ -1704,6 +1705,7 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	i2c_transfer_entry(adap, entry);
 	rv = entry->result;
 	i2c_entry_put(adap, entry);
+	kfree(entry);
 	return rv;
 }
 EXPORT_SYMBOL(i2c_transfer);
@@ -2467,6 +2469,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	entry->smbus.data = data;
 	entry->complete = NULL;
 	entry->result = -EOPNOTSUPP;
+	i2c_init_entry(adapter, entry);
 
 	if (algo->smbus_start) {
 		i2c_perform_op_wait(adapter, entry);
@@ -2567,7 +2570,8 @@ static void i2c_op_release(struct kref *ref)
 {
 	struct i2c_op_q_entry *entry = container_of(ref, struct i2c_op_q_entry,
 						    usecount);
-	entry->handler(entry);
+	if (entry->handler)
+		entry->handler(entry);
 }
 
 void i2c_entry_put(struct i2c_adapter *adap,
