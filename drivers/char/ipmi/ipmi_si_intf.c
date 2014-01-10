@@ -2674,10 +2674,10 @@ static int ipmi_probe(struct platform_device *dev)
 
 	dev_set_drvdata(&dev->dev, info);
 
-	rv = add_smi(info);
-	if (rv) {
+	ret = add_smi(info);
+	if (ret) {
 		kfree(info);
-		return rv;
+		return ret;
 	}
 #endif
 	return 0;
