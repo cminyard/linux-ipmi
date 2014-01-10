@@ -2669,8 +2669,8 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	entry->smbus.size = protocol;
 	entry->smbus.data = data;
 	entry->complete = NULL;
-	entry->result = -EOPNOTSUPP;
 	i2c_init_entry(adapter, entry);
+	entry->result = -EOPNOTSUPP;
 
 	if (algo->smbus_start) {
 		i2c_perform_op_wait(adapter, entry);
