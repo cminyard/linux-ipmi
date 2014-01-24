@@ -2846,9 +2846,10 @@ static int ipmi_parisc_probe(struct parisc_device *dev)
 
 	dev_set_drvdata(&dev->dev, info);
 
-	if (add_smi(info)) {
+	rv = add_smi(info);
+	if (rv) {
 		kfree(info);
-		return -EBUSY;
+		return rv;
 	}
 
 	return 0;
