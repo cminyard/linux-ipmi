@@ -2821,6 +2821,7 @@ static struct platform_driver ipmi_driver = {
 static int ipmi_parisc_probe(struct parisc_device *dev)
 {
 	struct smi_info *info;
+	int rv;
 
 	info = smi_info_alloc();
 
