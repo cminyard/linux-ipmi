@@ -2971,6 +2971,7 @@ static int __init serial8250_polled_init(void)
 	}
 	serial8250_reg.pollable_ports = serial8250_pollable_ports;
 	serial8250_reg.nr_pollable = nr_uarts;
+	serial8250_reg.nr = UART_NR;
 
 	uart_register_polled(&serial8250_reg);
 

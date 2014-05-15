@@ -329,6 +329,8 @@ struct uart_direct {
 struct module;
 struct tty_driver;
 
+#define UART_DRIVER_CONSOLE_ALLOCATED	(1 << 0)
+
 struct uart_driver {
 	struct module		*owner;
 	const char		*driver_name;
@@ -337,6 +339,7 @@ struct uart_driver {
 	int			 minor;
 	int			 nr;
 	struct console		*cons;
+	unsigned int		 flags;
 
 	/*
 	 * If nr_pollable is non-zero, then pollable_ports is an array of uart
