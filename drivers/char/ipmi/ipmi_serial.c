@@ -1915,36 +1915,29 @@ static void setup_intf(struct ipmi_serial_info *info,
 		return;
 	}
 	info->port->state->direct = &info->direct;
-	if (!info->port->state->xmit.buf) {
-		info->port->state->xmit.buf = info->uart_buffer;
-		uart_circ_clear(&info->port->state->xmit);
-		info->port->state->usflags |= UART_STATE_BOOT_ALLOCATED;
-	}
+	info->port->state->xmit.buf = info->uart_buffer;
+	uart_circ_clear(&info->port->state->xmit);
+	info->port->state->usflags |= UART_STATE_BOOT_ALLOCATED;
 
 	rv = info->port->ops->startup(info->port);
 	if (rv) {
-		if (info->port->state->xmit.buf == info->uart_buffer) {
-			info->port->state->xmit.buf = NULL;
-			info->port->state->usflags &=
-					~UART_STATE_BOOT_ALLOCATED;
-		}
-		uart_put_direct_port(info->port);
-		info->port = NULL;
 		printk(KERN_ERR PFX "Unable setup serial port %d\n",
 		       info->name, info->line, rv);
-		return;
+		goto err_out;
 	}
 
-	if (ipmi_serial_found(info)) {
-		if (info->port->state->xmit.buf == info->uart_buffer) {
-			info->port->state->xmit.buf = NULL;
-			info->port->state->usflags &=
-					~UART_STATE_BOOT_ALLOCATED;
-		}
-		info->port->ops->shutdown(info->port);
-		uart_put_direct_port(info->port);
-		info->port = NULL;
-	}
+	if (ipmi_serial_found(info))
+		goto err_shutdown;
+
+	return;
+
+err_shutdown:
+	info->port->ops->shutdown(info->port);
+err_out:
+	info->port->state->xmit.buf = NULL;
+	info->port->state->usflags &= ~UART_STATE_BOOT_ALLOCATED;
+	uart_put_direct_port(info->port);
+	info->port = NULL;
 }
 
 static void free_info_memory(struct ipmi_serial_info *info)
