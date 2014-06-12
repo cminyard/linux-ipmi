@@ -434,7 +434,7 @@ static void start_clear_flags(struct smi_info *smi_info)
 static void smi_mod_timer(struct smi_info *smi_info, unsigned long new_val)
 {
 	smi_info->last_timeout_jiffies = jiffies;
-	mod_timer(&smi_info->si_timer, jiffies + SI_TIMEOUT_JIFFIES);
+	mod_timer(&smi_info->si_timer, new_val);
 	smi_info->timer_running = true;
 }
 
