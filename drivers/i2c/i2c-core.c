@@ -1610,10 +1610,11 @@ static void i2c_perform_op_wait(struct i2c_adapter *adap,
 			entry->result = ret;
 			list_del(&entry->link);
 		}
-		spin_unlock_irqrestore(&adap->q_lock, flags);
 	}
 
-	if (!entry->result)
+	spin_unlock_irqrestore(&adap->q_lock, flags);
+
+	if (!ret)
 		wait_for_completion(&entry->done);
 }
 
@@ -2607,10 +2608,10 @@ void i2c_op_done(struct i2c_adapter *adap, struct i2c_op_q_entry *entry)
 		}
 	}
 
+next_entry:
 	entry->state = I2C_OP_FINISHED;
 	list_del(&entry->link);
 
-next_entry:
 	spin_unlock_irqrestore(&adap->q_lock, flags);
 
 	if (entry->complete)
