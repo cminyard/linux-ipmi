@@ -40,9 +40,11 @@ int fsl8250_handle_irq(struct uart_port *port)
 	}
 
 	/* This is the WAR; if last event was BRK, then read and return */
+	spin_lock(&up->lsr_lock);
 	if (unlikely(up->lsr_saved_flags & UART_LSR_BI)) {
 		up->lsr_saved_flags &= ~UART_LSR_BI;
 		port->serial_in(port, UART_RX);
+		spin_unlock(&up->lsr_lock);
 		spin_unlock_irqrestore(&up->port.lock, flags);
 		return 1;
 	}
@@ -58,6 +60,7 @@ int fsl8250_handle_irq(struct uart_port *port)
 		serial8250_tx_chars(up);
 
 	up->lsr_saved_flags = orig_lsr;
+	spin_unlock(&up->lsr_lock);
 	spin_unlock_irqrestore(&up->port.lock, flags);
 	return 1;
 }
