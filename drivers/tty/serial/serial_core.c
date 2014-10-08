@@ -1959,6 +1959,7 @@ static void uartdrv_console_write(struct console *co, const char *s,
 	int locked = 1;
 	int tmout;
 	int free;
+	int pending;
 
 	touch_nmi_watchdog();
 
@@ -2033,13 +2034,13 @@ do_timer:
 	 */
 
 	tmout = 10000;
-	free = uart_circ_chars_free(circ);
-	while ((free > 0) || !port->ops->tx_empty(port)) {
+	pending = uart_circ_chars_pending(circ);
+	while ((pending > 0) || !port->ops->tx_empty(port)) {
 		port->ops->poll(port, UART_POLL_FLAGS_TX);
 
-		if (free != uart_circ_chars_free(circ)) {
+		if (pending != uart_circ_chars_pending(circ)) {
 			tmout = 10000;
-			free = uart_circ_chars_free(circ);
+			pending = uart_circ_chars_pending(circ);
 			continue;
 		}
 		if (--tmout == 0)
