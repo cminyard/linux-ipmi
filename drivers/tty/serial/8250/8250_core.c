@@ -1302,8 +1302,10 @@ static void serial8250_start_tx(struct uart_port *port)
 
 		if (up->bugs & UART_BUG_TXEN) {
 			unsigned char lsr;
+			spin_lock(&up->lsr_lock);
 			lsr = serial_in(up, UART_LSR);
 			up->lsr_saved_flags |= lsr & LSR_SAVE_FLAGS;
+			spin_unlock(&up->lsr_lock);
 			if (lsr & UART_LSR_TEMT)
 				serial8250_tx_chars(up);
 		}
@@ -1370,8 +1372,10 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 		flag = TTY_NORMAL;
 		port->icount.rx++;
 
+		spin_lock(&up->lsr_lock);
 		lsr |= up->lsr_saved_flags;
 		up->lsr_saved_flags = 0;
+		spin_unlock(&up->lsr_lock);
 
 		if (unlikely(lsr & UART_LSR_BRK_ERROR_BITS)) {
 			if (lsr & UART_LSR_BI) {
@@ -1760,8 +1764,10 @@ static void serial8250_backup_timeout(unsigned long data)
 	 * the "Diva" UART used on the management processor on many HP
 	 * ia64 and parisc boxes.
 	 */
+	spin_lock(&up->lsr_lock);
 	lsr = serial_in(up, UART_LSR);
 	up->lsr_saved_flags |= lsr & LSR_SAVE_FLAGS;
+	spin_unlock(&up->lsr_lock);
 	if ((iir & UART_IIR_NO_INT) && (up->ier & UART_IER_THRI) &&
 	    (!uart_circ_empty(xmit) || up->port.x_char) &&
 	    (lsr & UART_LSR_THRE)) {
@@ -1789,10 +1795,10 @@ static unsigned int serial8250_tx_empty(struct uart_port *port)
 	unsigned long flags;
 	unsigned int lsr;
 
-	spin_lock_irqsave(&port->lock, flags);
+	spin_lock_irqsave(&up->lsr_lock, flags);
 	lsr = serial_port_in(port, UART_LSR);
 	up->lsr_saved_flags |= lsr & LSR_SAVE_FLAGS;
-	spin_unlock_irqrestore(&port->lock, flags);
+	spin_unlock_irqrestore(&up->lsr_lock, flags);
 
 	return (lsr & BOTH_EMPTY) == BOTH_EMPTY ? TIOCSER_TEMT : 0;
 }
@@ -1866,7 +1872,9 @@ static void wait_for_xmitr(struct uart_8250_port *up, int bits)
 	for (;;) {
 		status = serial_in(up, UART_LSR);
 
+		spin_lock(&up->lsr_lock);
 		up->lsr_saved_flags |= status & LSR_SAVE_FLAGS;
+		spin_unlock(&up->lsr_lock);
 
 		if ((status & bits) == bits)
 			break;
@@ -2155,6 +2163,7 @@ dont_test_tx_en:
 	serial_port_in(port, UART_RX);
 	serial_port_in(port, UART_IIR);
 	serial_port_in(port, UART_MSR);
+	spin_lock_init(&up->lsr_lock);
 	up->lsr_saved_flags = 0;
 	up->msr_saved_flags = 0;
 
@@ -2732,12 +2741,16 @@ static void serial8250_poll(struct uart_port *port, unsigned int flags)
 	struct uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned int status;
 
+ restart:
 	status = serial_port_in(port, UART_LSR);
 
 	if ((flags & UART_POLL_FLAGS_RX) && (status & UART_LSR_DR))
 		status = serial8250_rx_chars(up, status);
-	else
+	else {
+		spin_lock(&up->lsr_lock);
 		up->lsr_saved_flags |= status & LSR_SAVE_FLAGS;
+		spin_unlock(&up->lsr_lock);
+	}
 
 	if (flags & UART_POLL_FLAGS_MCTRL)
 		serial8250_modem_status(up);
@@ -2749,6 +2762,7 @@ static void serial8250_poll(struct uart_port *port, unsigned int flags)
 			serial_out(up, UART_TX, xmit->buf[xmit->tail]);
 			xmit->tail = uart_wrap_circ_buf(xmit->tail + 1);
 			up->port.icount.tx++;
+			goto restart;
 		}
 	}
 }
