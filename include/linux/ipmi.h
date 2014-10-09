@@ -195,6 +195,7 @@ int ipmi_request_with_source(ipmi_user_t      user,
  * way.  This is useful if you need to spin waiting for something to
  * happen in the IPMI driver.
  */
+bool ipmi_have_poll_interface(ipmi_user_t user);
 void ipmi_poll_interface(ipmi_user_t user);
 
 /*
