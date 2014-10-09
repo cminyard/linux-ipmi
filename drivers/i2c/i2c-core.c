@@ -1583,7 +1583,6 @@ static void i2c_init_entry(struct i2c_adapter *adap,
 	entry->end_jiffies = jiffies + adap->timeout;
 	entry->tries = 0;
 	kref_init(&entry->usecount);
-	entry->handler = NULL;
 }
 
 static void i2c_wait_done(struct i2c_op_q_entry *entry)
@@ -1702,6 +1701,7 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	entry->i2c.msgs = msgs;
 	entry->i2c.num = num;
 	entry->complete = NULL;
+	entry->handler = NULL;
 
 	i2c_transfer_entry(adap, entry);
 	rv = entry->result;
@@ -2469,6 +2469,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	entry->smbus.size = protocol;
 	entry->smbus.data = data;
 	entry->complete = NULL;
+	entry->handler = NULL;
 	i2c_init_entry(adapter, entry);
 	entry->result = -EOPNOTSUPP;
 
