@@ -1200,8 +1200,8 @@ static int wdog_panic_handler(struct notifier_block *this,
 	   the watchdog timer to a reasonable value to complete the
 	   panic, if the watchdog timer is running.  Plus the
 	   pretimeout is meaningless at panic time. */
-	if (watchdog_user && !panic_event_handled &&
-	    ipmi_watchdog_state != WDOG_TIMEOUT_NONE) {
+	if (watchdog_user && ipmi_have_poll_interface(watchdog_user) &&
+	    !panic_event_handled && ipmi_watchdog_state != WDOG_TIMEOUT_NONE) {
 		/* Make sure we do this only once. */
 		panic_event_handled = 1;
 
