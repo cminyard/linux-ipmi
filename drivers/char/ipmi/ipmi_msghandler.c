@@ -2846,6 +2846,11 @@ channel_handler(ipmi_smi_t intf, struct ipmi_recv_msg *msg)
 	return;
 }
 
+static bool ipmi_have_poll(ipmi_smi_t intf)
+{
+	return (intf->handlers->poll != NULL);
+}
+
 static void ipmi_poll(ipmi_smi_t intf)
 {
 	if (intf->handlers->poll)
@@ -2853,6 +2858,12 @@ static void ipmi_poll(ipmi_smi_t intf)
 	/* In case something came in */
 	handle_new_recv_msgs(intf);
 }
+
+bool ipmi_have_poll_interface(ipmi_user_t user)
+{
+	return ipmi_have_poll(user->intf);
+}
+EXPORT_SYMBOL(ipmi_have_poll_interface);
 
 void ipmi_poll_interface(ipmi_user_t user)
 {
@@ -4583,7 +4594,7 @@ static int panic_event(struct notifier_block *this,
 
 	/* For every registered interface, set it to run to completion. */
 	list_for_each_entry_rcu(intf, &ipmi_interfaces, link) {
-		if (!intf->handlers)
+		if (!intf->handlers || !ipmi_have_poll(intf))
 			/* Interface is not ready. */
 			continue;
 
