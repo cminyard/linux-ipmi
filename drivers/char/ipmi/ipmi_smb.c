@@ -1460,7 +1460,6 @@ static int smb_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			       smb_info,
 			       &smb_info->device_id,
 			       &smb_info->client->dev,
-			       "bmc",
 			       slave_addr);
 	 if (rv) {
 		printk(KERN_ERR

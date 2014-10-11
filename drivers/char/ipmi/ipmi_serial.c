@@ -1733,7 +1733,6 @@ static int ipmi_serial_found(struct ipmi_serial_info *info)
 	int                     timeout;
 	int                     retries;
 	unsigned int            capabilities;
-	char		        sysfs_name[sizeof(info->name) + 4];
 
 	printk(KERN_INFO PFX "Found a matching serial port\n",
 	       info->name, info->line);
@@ -1824,14 +1823,10 @@ static int ipmi_serial_found(struct ipmi_serial_info *info)
 	}
 
 
-	snprintf(sysfs_name, sizeof(sysfs_name), "bmc:%s%d", info->name,
-		 info->line);
-
 	rv = ipmi_register_smi(&handlers,
 			       info,
 			       &info->device_id,
 			       info->port->dev,
-			       sysfs_name,
 			       info->slave_addr);
 	if (rv) {
 		printk(KERN_ERR PFX "Unable to register the "
