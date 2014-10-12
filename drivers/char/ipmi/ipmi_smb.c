@@ -524,7 +524,7 @@ static int nb_ssif_i2c_send(struct ssif_info *ssif_info,
 
 static void retry_timeout(unsigned long data);
 
-static void set_run_to_completion(void *send_info, bool i_run_to_completion)
+static void set_run_to_completion(void *send_info, int i_run_to_completion)
 {
 	struct ssif_info *ssif_info = (struct ssif_info *) send_info;
 
