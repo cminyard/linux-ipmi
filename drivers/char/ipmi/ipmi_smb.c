@@ -42,11 +42,6 @@
  * and drives the real SSIF state machine.
  */
 
-/*
- * TODO: Figure out how to use SMB alerts.  This will require a new
- * interface into the I2C driver, I believe.
- */
-
 #include <linux/version.h>
 #if defined(MODVERSIONS)
 #include <linux/modversions.h>
@@ -1190,6 +1185,12 @@ static int ssif_start_processing(void       *send_info,
 	return 0;
 }
 
+static void ssif_alert(struct i2c_client *client, unsigned int data)
+{
+	struct ssif_info *ssif_info = i2c_get_clientdata(client);
+	request_events(ssif_info);
+}
+
 #define MAX_SSIF_BMCS 4
 
 static unsigned short addr[MAX_SSIF_BMCS];
@@ -1460,6 +1461,7 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	int               i;
 	acpi_handle       acpi_handle;
 	u8		  slave_addr = 0;
+	u8		  flags;
 	struct ssif_client_info *info = NULL;
 
 
@@ -1594,26 +1596,36 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		goto found;
 	}
 
-	if (resp[3] & IPMI_BMC_EVT_MSG_BUFF) {
-		ssif_info->has_event_buffer = true;
-		/* buffer is already enabled, nothing to do. */
-		goto found;
-	}
+	flags = resp[3];
 
+	/* Check if the event message buffer is present. */
 	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
 	msg[1] = IPMI_SET_BMC_GLOBAL_ENABLES_CMD;
-	msg[2] = resp[3] | IPMI_BMC_EVT_MSG_BUFF;
+	msg[2] = flags | IPMI_BMC_EVT_MSG_BUFF;
 	rv = do_cmd(client, 3, msg, &len, resp);
 	if (rv || (len < 2)) {
-		pr_warn(PFX "Error getting global enables: %d %d %2.2x\n",
-			rv, len, resp[2]);
+		pr_warn(PFX "Error setting event message buffer: %d %d\n",
+			rv, len);
 		rv = 0; /* Not fatal */
 		goto found;
 	}
 
-	if (resp[2] == 0)
+	if (resp[2] == 0) {
 		/* A successful return means the event buffer is supported. */
 		ssif_info->has_event_buffer = true;
+		flags |= IPMI_BMC_EVT_MSG_BUFF;
+	}
+
+	/* Enable other things so alerts tell us when stuff comes in. */
+	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
+	msg[1] = IPMI_SET_BMC_GLOBAL_ENABLES_CMD;
+	msg[2] = flags | IPMI_BMC_RCV_MSG_INTR | IPMI_BMC_RCV_MSG_INTR;
+	rv = do_cmd(client, 3, msg, &len, resp);
+	if (rv || (len < 2) || (resp[2] != 0)) {
+		pr_warn(PFX "Error setting global enables: %d %d %2.2x\n",
+			rv, len, resp[2]);
+		rv = 0; /* Not fatal */
+	}
 
  found:
 	ssif_info->intf_num = atomic_inc_return(&next_intf);
@@ -2182,6 +2194,7 @@ static struct i2c_driver ssif_i2c_driver = {
 		.owner			= THIS_MODULE,
 		.name			= DEVICE_NAME
 	},
+	.alert		= ssif_alert,
 	.probe		= ssif_probe,
 	.remove		= ssif_remove,
 	.id_table	= ssif_id,
