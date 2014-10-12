@@ -57,6 +57,10 @@
 #define PFX "ipmi_ssif: "
 #define DEVICE_NAME "ipmi_ssif"
 
+#ifdef I2C_OP_QUEUED
+#define I2C_HAVE_NONBLOCKING 1
+#endif
+
 #define IPMI_GET_SYSTEM_INTERFACE_CAPABILITIES_CMD	0x57
 
 #define	SSIF_IPMI_REQUEST			2
@@ -240,6 +244,16 @@ struct ssif_info {
 	 */
 	bool                req_flags;
 
+#ifdef I2C_HAVE_NONBLOCKING
+	/*
+	 * If true, run the state machine to completion on every send
+	 * call.  Generally used after a panic or shutdown to make
+	 * sure stuff goes out.
+	 */
+	bool                run_to_completion;
+	struct i2c_op_q_entry i2c_q_entry;
+#endif
+
 	/*
 	 * Used to perform timer operations when run-to-completion
 	 * mode is on.  This is a countdown timer.
@@ -303,9 +317,17 @@ static int start_send(struct ssif_info *ssif_info,
 		      unsigned char   *data,
 		      unsigned int    len);
 
+/*
+ * If run_to_completion mode is on, return NULL to know the lock wasn't
+ * taken.  Otherwise lock info->lock and return the flags.
+ */
 static unsigned long *ipmi_ssif_lock_cond(struct ssif_info *ssif_info,
 					  unsigned long *flags)
 {
+#ifdef I2C_HAVE_NONBLOCKING
+	if (ssif_info->run_to_completion)
+		return NULL;
+#endif
 	spin_lock_irqsave(&ssif_info->lock, *flags);
 	return flags;
 }
@@ -313,6 +335,10 @@ static unsigned long *ipmi_ssif_lock_cond(struct ssif_info *ssif_info,
 static void ipmi_ssif_unlock_cond(struct ssif_info *ssif_info,
 				  unsigned long *flags)
 {
+#ifdef I2C_HAVE_NONBLOCKING
+	if (!flags)
+		return;
+#endif
 	spin_unlock_irqrestore(&ssif_info->lock, *flags);
 }
 
@@ -472,6 +498,75 @@ static void handle_flags(struct ssif_info *ssif_info, unsigned long *flags)
 	}
 }
 
+#ifdef I2C_HAVE_NONBLOCKING
+static void ssif_i2c_handler(struct i2c_op_q_entry *i2ce)
+{
+	struct ssif_info *ssif_info = i2ce->handler_data;
+
+	if (i2ce->smbus.read_write == I2C_SMBUS_READ) {
+		ssif_info->done_handler(ssif_info, i2ce->result,
+				       ssif_info->recv + 1, ssif_info->recv[0]);
+		/* data[0] is number of bytes *after* data[0]. */
+	} else {
+		ssif_info->done_handler(ssif_info, i2ce->result, NULL, 0);
+	}
+}
+
+static int nb_ssif_i2c_send(struct ssif_info *ssif_info,
+			   int read_write, int command,
+			   unsigned char *data, unsigned int size)
+{
+	struct i2c_op_q_entry *i2ce = &ssif_info->i2c_q_entry;
+
+	i2ce->xfer_type = I2C_OP_SMBUS;
+	i2ce->handler = ssif_i2c_handler;
+	i2ce->handler_data = ssif_info;
+	i2ce->smbus.read_write = read_write;
+	i2ce->smbus.command = command;
+	i2ce->smbus.data = (union i2c_smbus_data *) data;
+	i2ce->smbus.size = size;
+	if (i2c_non_blocking_op(ssif_info->client, i2ce))
+		return -EIO;
+
+	return 0;
+}
+
+static void retry_timeout(unsigned long data);
+
+static void set_run_to_completion(void *send_info, bool i_run_to_completion)
+{
+	struct ssif_info *ssif_info = (struct ssif_info *) send_info;
+
+	ssif_info->run_to_completion = i_run_to_completion;
+	/*
+	 * Note that if this does not compile, there are some I2C
+	 * changes that you need to handle this properly.
+	 */
+	if (i_run_to_completion) {
+		i2c_poll(ssif_info->client, 0);
+		while (!SSIF_IDLE(ssif_info)) {
+			udelay(500);
+			if (ssif_info->rtc_us_timer > 0) {
+				ssif_info->rtc_us_timer -= 500;
+				if (ssif_info->rtc_us_timer <= 0) {
+					retry_timeout((unsigned long)
+						      ssif_info);
+					del_timer(&ssif_info->retry_timer);
+				}
+			}
+			i2c_poll(ssif_info->client, 500000);
+		}
+	}
+}
+
+static void poll(void *send_info)
+{
+	struct ssif_info *ssif_info = send_info;
+
+	i2c_poll(ssif_info->client, 10000);
+}
+#endif /* I2C_HAVE_NONBLOCKING */
+
 static int ipmi_ssif_thread(void *data)
 {
 	struct ssif_info *ssif_info = data;
@@ -517,6 +612,13 @@ static int ssif_i2c_send(struct ssif_info *ssif_info,
 			unsigned char *data, unsigned int size)
 {
 	ssif_info->done_handler = handler;
+
+#ifdef I2C_HAVE_NONBLOCKING
+	if (!ssif_info->thread) {
+		return nb_ssif_i2c_send(ssif_info, read_write,
+				       command, data, size);
+	}
+#endif
 
 	ssif_info->i2c_read_write = read_write;
 	ssif_info->i2c_command = command;
@@ -1034,6 +1136,34 @@ static void sender(void                *send_info,
 	ssif_info->waiting_msg = msg;
 
 	flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
+#ifdef I2C_HAVE_NONBLOCKING
+	if (ssif_info->run_to_completion) {
+		/*
+		 * If we are running to completion, then throw it in
+		 * the list and run transactions until everything is
+		 * clear.  Priority doesn't matter here.
+		 */
+
+		ssif_info->curr_msg = ssif_info->waiting_msg;
+		ssif_info->waiting_msg = NULL;
+
+		i2c_poll(ssif_info->client, 0);
+		while (!SSIF_IDLE(ssif_info)) {
+			udelay(500);
+			if (ssif_info->rtc_us_timer > 0) {
+				ssif_info->rtc_us_timer -= 500;
+				if (ssif_info->rtc_us_timer <= 0) {
+					retry_timeout((unsigned long)
+						      ssif_info);
+					del_timer(&ssif_info->retry_timer);
+				}
+			}
+			i2c_poll(ssif_info->client, 500000);
+		}
+		return;
+	}
+#endif
+
 	start_next_msg(ssif_info, flags);
 
 	if (ssif_info->ssif_debug & SSIF_DEBUG_TIMING) {
@@ -1691,6 +1821,13 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	ssif_info->handlers.inc_usecount = inc_usecount;
 	ssif_info->handlers.dec_usecount = dec_usecount;
 
+#ifdef I2C_HAVE_NONBLOCKING
+	if (!use_thread && i2c_non_blocking_capable(client->adapter)) {
+		ssif_info->handlers.set_run_to_completion =
+			set_run_to_completion;
+		ssif_info->handlers.poll = poll;
+	} else
+#endif
 	{
 		unsigned int thread_num;
 
