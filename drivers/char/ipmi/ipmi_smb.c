@@ -225,19 +225,19 @@ struct ssif_info {
 #define WDT_PRE_TIMEOUT_INT	0x08
 	unsigned char       msg_flags;
 
-	char		    has_event_buffer;
+	bool		    has_event_buffer;
 
 	/*
 	 * If set to true, this will request events the next time the
 	 * state machine is idle.
 	 */
-	int                 req_events;
+	bool                req_events;
 
 	/*
 	 * If set to true, this will request flags the next time the
 	 * state machine is idle.
 	 */
-	int                 req_flags;
+	bool                req_flags;
 
 #ifdef I2C_HAVE_NONBLOCKING
 	/*
@@ -245,7 +245,7 @@ struct ssif_info {
 	 * call.  Generally used after a panic or shutdown to make
 	 * sure stuff goes out.
 	 */
-	int                 run_to_completion;
+	bool                run_to_completion;
 	struct i2c_op_q_entry i2c_q_entry;
 #endif
 
@@ -397,7 +397,7 @@ static void start_flag_fetch(struct ssif_info *ssif_info, unsigned long *flags)
 {
 	unsigned char mb[2];
 
-	ssif_info->req_flags = 0;
+	ssif_info->req_flags = false;
 	ssif_info->ssif_state = SSIF_GETTING_FLAGS;
 	ipmi_ssif_unlock_cond(ssif_info, flags);
 
@@ -411,7 +411,7 @@ static void start_event_fetch(struct ssif_info *ssif_info, unsigned long *flags)
 {
 	struct ipmi_smi_msg *msg;
 
-	ssif_info->req_events = 0;
+	ssif_info->req_events = false;
 
 	msg = ipmi_alloc_smi_msg();
 	if (!msg) {
@@ -524,7 +524,7 @@ static int nb_ssif_i2c_send(struct ssif_info *ssif_info,
 
 static void retry_timeout(unsigned long data);
 
-static void set_run_to_completion(void *send_info, int i_run_to_completion)
+static void set_run_to_completion(void *send_info, bool i_run_to_completion)
 {
 	struct ssif_info *ssif_info = (struct ssif_info *) send_info;
 
@@ -1148,11 +1148,11 @@ static void request_events(void *send_info)
 	 * doesn't have a way to send an attention.  But make sure
 	 * event checking still happens.
 	 */
-	ssif_info->req_events = 1;
+	ssif_info->req_events = true;
 	if (SSIF_IDLE(ssif_info))
 		start_flag_fetch(ssif_info, flags);
 	else {
-		ssif_info->req_flags = 1;
+		ssif_info->req_flags = true;
 		ipmi_ssif_unlock_cond(ssif_info, flags);
 	}
 }
@@ -1224,8 +1224,8 @@ MODULE_PARM_DESC(dbg, "Turn on debugging.  Bit 0 enables message debugging,"
 		 " bit 1 enables state debugging, and bit 2 enables timing"
 		 " debugging.  This is an array indexed by interface number");
 
-static int ssif_dbg_probe;
-module_param_named(dbg_probe, ssif_dbg_probe, int, 0);
+static bool ssif_dbg_probe;
+module_param_named(dbg_probe, ssif_dbg_probe, bool, 0);
 MODULE_PARM_DESC(dbg_probe, "Enable debugging of probing of adapters.");
 
 static int use_thread;
@@ -1612,7 +1612,7 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	if (resp[2] == 0) {
 		/* A successful return means the event buffer is supported. */
-		ssif_info->has_event_buffer = 1;
+		ssif_info->has_event_buffer = true;
 		flags |= IPMI_BMC_EVT_MSG_BUFF;
 	}
 
