@@ -1165,6 +1165,10 @@ static void request_events(void *send_info)
 static int inc_usecount(void *send_info)
 {
 	struct ssif_info *ssif_info = send_info;
+
+	if (!i2c_get_adapter(ssif_info->client->adapter->nr))
+		return -ENODEV;
+
 	i2c_use_client(ssif_info->client);
 	return 0;
 }
@@ -1173,6 +1177,7 @@ static void dec_usecount(void *send_info)
 {
 	struct ssif_info *ssif_info = send_info;
 	i2c_release_client(ssif_info->client);
+	i2c_put_adapter(ssif_info->client->adapter);
 }
 
 static int ssif_start_processing(void       *send_info,
