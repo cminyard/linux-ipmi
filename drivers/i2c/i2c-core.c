@@ -53,6 +53,7 @@
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/pm_wakeirq.h>
+#include <linux/ctype.h>
 #include <linux/property.h>
 #include <linux/rwsem.h>
 #include <linux/slab.h>
@@ -1007,7 +1008,10 @@ static void i2c_device_shutdown(struct device *dev)
 
 static void i2c_client_dev_release(struct device *dev)
 {
-	kfree(to_i2c_client(dev));
+	struct i2c_client *client = to_i2c_client(dev);
+
+	kfree(client->parms);
+	kfree(client);
 }
 
 static ssize_t
@@ -1266,6 +1270,13 @@ i2c_new_device(struct i2c_adapter *adap, struct i2c_board_info const *info)
 	client->flags = info->flags;
 	client->addr = info->addr;
 	client->irq = info->irq;
+	if (info->parms) {
+		client->parms = kstrdup(info->parms, GFP_KERNEL);
+		if (!client->parms) {
+			dev_err(&adap->dev, "Out of memory allocating parms\n");
+			goto out_err_silent;
+		}
+	}
 
 	strlcpy(client->name, info->type, sizeof(client->name));
 
@@ -1457,31 +1468,39 @@ i2c_sysfs_new_device(struct device *dev, struct device_attribute *attr,
 	struct i2c_adapter *adap = to_i2c_adapter(dev);
 	struct i2c_board_info info;
 	struct i2c_client *client;
-	char *blank, end;
+	char *pos, end;
 	int res;
 
 	memset(&info, 0, sizeof(struct i2c_board_info));
 
-	blank = strchr(buf, ' ');
-	if (!blank) {
+	pos = strpbrk(buf, " \t");
+	if (!pos) {
 		dev_err(dev, "%s: Missing parameters\n", "new_device");
 		return -EINVAL;
 	}
-	if (blank - buf > I2C_NAME_SIZE - 1) {
+	if (pos - buf > I2C_NAME_SIZE - 1) {
 		dev_err(dev, "%s: Invalid device name\n", "new_device");
 		return -EINVAL;
 	}
-	memcpy(info.type, buf, blank - buf);
+	memcpy(info.type, buf, pos - buf);
 
-	/* Parse remaining parameters, reject extra parameters */
-	res = sscanf(++blank, "%hi%c", &info.addr, &end);
-	if (res < 1) {
+	while (isspace(*pos))
+		pos++;
+
+	/* Parse address, saving remaining parameters. */
+	res = sscanf(pos, "%hi%c", &info.addr, &end);
+	if (res < 1 || (res > 1 && !isspace(end))) {
 		dev_err(dev, "%s: Can't parse I2C address\n", "new_device");
 		return -EINVAL;
 	}
-	if (res > 1  && end != '\n') {
-		dev_err(dev, "%s: Extra parameters\n", "new_device");
-		return -EINVAL;
+	if (res > 1) {
+		/* Extra parms, skip the address and space. */
+		while (!isspace(*pos))
+			pos++;
+		while (isspace(*pos))
+			pos++;
+		if (*pos)
+			info.parms = pos;
 	}
 
 	if ((info.addr & I2C_ADDR_OFFSET_TEN_BIT) == I2C_ADDR_OFFSET_TEN_BIT) {
