@@ -222,6 +222,7 @@ struct i2c_client {
 	char name[I2C_NAME_SIZE];
 	struct i2c_adapter *adapter;	/* the adapter we sit on	*/
 	struct device dev;		/* the device structure		*/
+	char *parms;			/* sysfs extra parms		*/
 	int irq;			/* irq issued by device		*/
 	struct list_head detected;
 #if IS_ENABLED(CONFIG_I2C_SLAVE)
@@ -279,6 +280,7 @@ static inline int i2c_slave_event(struct i2c_client *client,
  * @archdata: copied into i2c_client.dev.archdata
  * @of_node: pointer to OpenFirmware device node
  * @fwnode: device node supplied by the platform firmware
+ * @parms: Parameters supplied on the sysfs command line
  * @irq: stored in i2c_client.irq
  *
  * I2C doesn't actually support hardware probing, although controllers and
@@ -300,6 +302,7 @@ struct i2c_board_info {
 	struct dev_archdata	*archdata;
 	struct device_node *of_node;
 	struct fwnode_handle *fwnode;
+	char            *parms;
 	int		irq;
 };
 
