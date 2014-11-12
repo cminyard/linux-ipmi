@@ -1347,6 +1347,8 @@ static void serial8250_enable_ms(struct uart_port *port)
  * serial8250_rx_chars: processes according to the passed in LSR
  * value, and returns the remaining LSR bits not handled
  * by this Rx routine.
+ *
+ * Must be called with the port lock and lsr lock held.
  */
 unsigned char
 serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
@@ -1372,10 +1374,8 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 		flag = TTY_NORMAL;
 		port->icount.rx++;
 
-		spin_lock(&up->lsr_lock);
 		lsr |= up->lsr_saved_flags;
 		up->lsr_saved_flags = 0;
-		spin_unlock(&up->lsr_lock);
 
 		if (unlikely(lsr & UART_LSR_BRK_ERROR_BITS)) {
 			if (lsr & UART_LSR_BI) {
@@ -1506,6 +1506,7 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 		return 0;
 
 	spin_lock_irqsave(&port->lock, flags);
+	spin_lock(&port->lsr_lock);
 
 	status = serial_port_in(port, UART_LSR);
 
@@ -1517,10 +1518,13 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 
 		if (!up->dma || dma_err)
 			status = serial8250_rx_chars(up, status);
+		spin_unlock(&port->lsr_lock);
 		spin_unlock_irqrestore(&up->port.lock, flags);
 		uart_push(&up->port);
 		spin_lock_irqsave(&up->port.lock, flags);
-	}
+	} else
+		spin_unlock(&port->lsr_lock);
+
 	serial8250_modem_status(up);
 	if (!up->dma && (status & UART_LSR_THRE))
 		serial8250_tx_chars(up);
@@ -2743,14 +2747,14 @@ static void serial8250_poll(struct uart_port *port, unsigned int flags)
 
  restart:
 	status = serial_port_in(port, UART_LSR);
+	spin_lock(&port->lsr_lock);
 
 	if ((flags & UART_POLL_FLAGS_RX) && (status & UART_LSR_DR))
 		status = serial8250_rx_chars(up, status);
 	else {
-		spin_lock(&up->lsr_lock);
 		up->lsr_saved_flags |= status & LSR_SAVE_FLAGS;
-		spin_unlock(&up->lsr_lock);
 	}
+	spin_unlock(&port->lsr_lock);
 
 	if (flags & UART_POLL_FLAGS_MCTRL)
 		serial8250_modem_status(up);
