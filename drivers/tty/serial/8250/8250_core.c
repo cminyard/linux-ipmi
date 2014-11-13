@@ -1506,7 +1506,7 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 		return 0;
 
 	spin_lock_irqsave(&port->lock, flags);
-	spin_lock(&port->lsr_lock);
+	spin_lock(&up->lsr_lock);
 
 	status = serial_port_in(port, UART_LSR);
 
@@ -1518,12 +1518,12 @@ int serial8250_handle_irq(struct uart_port *port, unsigned int iir)
 
 		if (!up->dma || dma_err)
 			status = serial8250_rx_chars(up, status);
-		spin_unlock(&port->lsr_lock);
+		spin_unlock(&up->lsr_lock);
 		spin_unlock_irqrestore(&up->port.lock, flags);
 		uart_push(&up->port);
 		spin_lock_irqsave(&up->port.lock, flags);
 	} else
-		spin_unlock(&port->lsr_lock);
+		spin_unlock(&up->lsr_lock);
 
 	serial8250_modem_status(up);
 	if (!up->dma && (status & UART_LSR_THRE))
@@ -2747,14 +2747,14 @@ static void serial8250_poll(struct uart_port *port, unsigned int flags)
 
  restart:
 	status = serial_port_in(port, UART_LSR);
-	spin_lock(&port->lsr_lock);
+	spin_lock(&up->lsr_lock);
 
 	if ((flags & UART_POLL_FLAGS_RX) && (status & UART_LSR_DR))
 		status = serial8250_rx_chars(up, status);
 	else {
 		up->lsr_saved_flags |= status & LSR_SAVE_FLAGS;
 	}
-	spin_unlock(&port->lsr_lock);
+	spin_unlock(&up->lsr_lock);
 
 	if (flags & UART_POLL_FLAGS_MCTRL)
 		serial8250_modem_status(up);
