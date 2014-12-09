@@ -1451,6 +1451,21 @@ restart:
 	return found;
 }
 
+static bool check_acpi(struct ssif_info *ssif_info, struct device *dev)
+{
+#ifdef CONFIG_ACPI
+	acpi_handle acpi_handle;
+
+	acpi_handle = ACPI_HANDLE(dev);
+	if (acpi_handle) {
+		ssif_info->addr_source = SI_ACPI;
+		ssif_info->addr_info.acpi_info.acpi_handle = acpi_handle;
+		return true;
+	}
+#endif
+	return false;
+}
+
 static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	unsigned char     msg[3];
@@ -1459,7 +1474,6 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	int               rv = 0;
 	int               len;
 	int               i;
-	acpi_handle       acpi_handle;
 	u8		  slave_addr = 0;
 	u8		  flags;
 	struct ssif_client_info *info = NULL;
@@ -1475,11 +1489,7 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		return -ENOMEM;
 	}
 
-	acpi_handle = ACPI_HANDLE(&client->dev);
-	if (acpi_handle) {
-		ssif_info->addr_source = SI_ACPI;
-		ssif_info->addr_info.acpi_info.acpi_handle = acpi_handle;
-	} else {
+	if (!check_acpi(ssif_info, &client->dev)) {
 		info = ssif_info_find(client->addr, client->adapter->name,
 				      true);
 		if (!info) {
