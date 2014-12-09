@@ -254,7 +254,7 @@ struct ipmi_serial_info {
 	 * call.  Generally used after a panic to make sure stuff goes
 	 * out.
 	 */
-	int run_to_completion;
+	bool run_to_completion;
 
 	/*
 	 * The driver is shutting down, don't start anything new.
@@ -1269,7 +1269,7 @@ static void ipmi_serial_request_events(void *send_info)
 	start_next_msg(info, flags);
 }
 
-static void ipmi_serial_set_run_to_completion(void *send_info, int rtc_on)
+static void ipmi_serial_set_run_to_completion(void *send_info, bool rtc_on)
 {
 	struct ipmi_serial_info *info = send_info;
 	struct uart_port *port;
