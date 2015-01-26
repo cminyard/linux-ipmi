@@ -1357,6 +1357,7 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 	unsigned char ch;
 	int max_count = 256;
 	char flag;
+	int rv;
 
 	do {
 		if (likely(lsr & UART_LSR_DR))
@@ -1409,13 +1410,27 @@ serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)
 			else if (lsr & UART_LSR_FE)
 				flag = TTY_FRAME;
 		}
-		if (uart_handle_sysrq_char(port, ch))
+
+		/*
+		 * Release the lsr_lock here, as sysrq may send output
+		 * and claim this lock there.  This may cause
+		 * lsr_saved_flags to be set again, but we will re-read
+		 * those flags again below when we read the lsr again.
+		 */
+		spin_unlock(&up->lsr_lock);
+		rv = uart_handle_sysrq_char(port, ch);
+		spin_lock(&up->lsr_lock);
+		if (rv)
 			goto ignore_char;
 
 		uart_insert_char(port, lsr, UART_LSR_OE, ch, flag);
 
 ignore_char:
 		lsr = serial_in(up, UART_LSR);
+
+		/* We released lsr_lock, we need to re-read this. */
+		lsr |= up->lsr_saved_flags;
+		up->lsr_saved_flags = 0;
 	} while ((lsr & (UART_LSR_DR | UART_LSR_BI)) && (max_count-- > 0));
 	return lsr;
 }
