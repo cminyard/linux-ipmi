@@ -73,7 +73,8 @@ static struct device_type i2c_client_type;
 static int i2c_detect(struct i2c_adapter *adapter, struct i2c_driver *driver);
 static enum hrtimer_restart i2c_handle_timer(struct hrtimer *hrtimer);
 static int i2c_start_next_entry(struct i2c_adapter *adap,
-				struct i2c_op_q_entry *myentry);
+				struct i2c_op_q_entry *myentry,
+				bool add_head);
 static void i2c_op_done_tasklet(unsigned long tdata);
 
 static struct static_key i2c_trace_msg = STATIC_KEY_INIT_FALSE;
@@ -1579,6 +1580,7 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 		adap->timer = &adap->real_timer;
 	}
 	tasklet_init(&adap->tasklet, i2c_op_done_tasklet, (unsigned long) adap);
+	adap->op_done_handler = NULL;
 
 	/* Set default timeout to 1 second if not already set */
 	if (adap->timeout == 0)
@@ -2309,7 +2311,7 @@ static void i2c_perform_op_wait(struct i2c_adapter *adap,
 	pr_debug("i2c_perform_op_wait %p %p\n", adap, entry);
 	entry->handler = i2c_wait_done;
 
-	ret = i2c_start_next_entry(adap, entry);
+	ret = i2c_start_next_entry(adap, entry, false);
 	if (!ret)
 		wait_for_completion(&entry->done);
 }
@@ -3555,12 +3557,17 @@ next_entry:
  * instead.
  */
 static int i2c_start_next_entry(struct i2c_adapter *adap,
-				struct i2c_op_q_entry *myentry)
+				struct i2c_op_q_entry *myentry,
+				bool queue_head)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(adap->q_lock, flags);
-	list_add_tail(&myentry->link, adap->q);
+	if (queue_head)
+		list_add(&myentry->link, adap->q);
+	else
+		list_add_tail(&myentry->link, adap->q);
+
 	return _i2c_start_next_entry(adap, myentry, &flags);
 }
 
@@ -3647,6 +3654,17 @@ restart:
 		}
 	}
 
+	if (adap->op_done_handler) {
+		/*
+		 * Mux handlers intercept this and re-call when they
+		 * are finished with their mux handling.
+		 */
+		entry->state = I2C_OP_RUNNING;
+		spin_unlock_irqrestore(adap->q_lock, flags);
+		adap->op_done_handler(adap, entry);
+		goto out_finish;
+	}
+
 	list_del(&entry->link);
 	list_add_tail(&entry->link, &finished_list);
 
@@ -3700,10 +3718,10 @@ void i2c_poll(struct i2c_client *client,
 }
 EXPORT_SYMBOL(i2c_poll);
 
-int i2c_non_blocking_op(struct i2c_client *client,
-			struct i2c_op_q_entry *entry)
+static int _i2c_non_blocking_op(struct i2c_client *client,
+				struct i2c_op_q_entry *entry,
+				bool queue_head)
 {
-	unsigned long      flags;
 	struct i2c_adapter *adap = client->adapter;
 
 	if (!i2c_non_blocking_capable(adap))
@@ -3721,9 +3739,22 @@ int i2c_non_blocking_op(struct i2c_client *client,
 
 	i2c_init_entry(adap, entry);
 
-	return i2c_start_next_entry(adap, entry);
+	return i2c_start_next_entry(adap, entry, queue_head);
+}
+
+int i2c_non_blocking_op(struct i2c_client *client,
+			struct i2c_op_q_entry *entry)
+{
+	return _i2c_non_blocking_op(client, entry, false);
 }
 EXPORT_SYMBOL(i2c_non_blocking_op);
+
+int i2c_non_blocking_op_head(struct i2c_client *client,
+			     struct i2c_op_q_entry *entry)
+{
+	return _i2c_non_blocking_op(client, entry, true);
+}
+EXPORT_SYMBOL(i2c_non_blocking_op_head);
 
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus main module");

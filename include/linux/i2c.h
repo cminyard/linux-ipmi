@@ -145,6 +145,13 @@ extern int i2c_non_blocking_op(struct i2c_client *client,
 			       struct i2c_op_q_entry *entry);
 
 /*
+ * Like above, but queue it to the head.  This is for mux use only, as
+ * it will mess up any ongoing operations otherwise.
+ */
+extern int i2c_non_blocking_op_head(struct i2c_client *client,
+				    struct i2c_op_q_entry *entry);
+
+/*
  * Poll the i2c interface.  This should only be called in a situation
  * where scheduling and interrupts are off.  You should put the amount
  * of nanoseconds between calls in ns_since_last_call.
@@ -620,6 +627,10 @@ struct i2c_adapter {
 	struct hrtimer real_timer;
 
 	struct tasklet_struct tasklet;
+
+	/* Special handling for operation done, for muxes. */
+	void (*op_done_handler)(struct i2c_adapter *, struct i2c_op_q_entry *);
+	void *op_done_data;
 
 	int timeout;			/* in jiffies */
 	int retries;
