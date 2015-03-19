@@ -79,6 +79,42 @@ static int i2c_mux_smbus_xfer(struct i2c_adapter *adap,
 	return ret;
 }
 
+static int i2c_mux_master_start(struct i2c_adapter    *adap,
+				struct i2c_op_q_entry *entry)
+{
+	struct i2c_mux_priv *priv = adap->algo_data;
+	struct i2c_adapter *parent = priv->parent;
+	int ret;
+
+	/* Switch to the right mux port and perform the transfer. */
+
+	ret = priv->select(parent, priv->mux_priv, priv->chan_id);
+	if (ret >= 0)
+		ret = parent->algo->master_start(adap, entry);
+	if (priv->deselect)
+		priv->deselect(parent, priv->mux_priv, priv->chan_id);
+
+	return ret;
+}
+
+static int i2c_mux_smbus_start(struct i2c_adapter *adap,
+			       struct i2c_op_q_entry *entry)
+{
+	struct i2c_mux_priv *priv = adap->algo_data;
+	struct i2c_adapter *parent = priv->parent;
+	int ret;
+
+	/* Select the right mux port and perform the transfer. */
+
+	ret = priv->select(parent, priv->mux_priv, priv->chan_id);
+	if (ret >= 0)
+		ret = parent->algo->smbus_start(adap, entry);
+	if (priv->deselect)
+		priv->deselect(parent, priv->mux_priv, priv->chan_id);
+
+	return ret;
+}
+
 /* Return the parent's functionality */
 static u32 i2c_mux_functionality(struct i2c_adapter *adap)
 {
@@ -131,6 +167,10 @@ struct i2c_adapter *i2c_add_mux_adapter(struct i2c_adapter *parent,
 		priv->algo.master_xfer = i2c_mux_master_xfer;
 	if (parent->algo->smbus_xfer)
 		priv->algo.smbus_xfer = i2c_mux_smbus_xfer;
+	if (parent->algo->master_start)
+		priv->algo.master_start = i2c_mux_master_start;
+	if (parent->algo->smbus_start)
+		priv->algo.smbus_start = i2c_mux_smbus_start;
 	priv->algo.functionality = i2c_mux_functionality;
 
 	/* Now fill out new adapter structure */
