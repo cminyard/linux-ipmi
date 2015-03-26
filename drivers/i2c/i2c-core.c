@@ -2495,7 +2495,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	}
 
 	if (entry->result != -EOPNOTSUPP ||
-					!adapter->algo->master_xfer) {
+	    (!adapter->algo->master_xfer && !adapter->algo->master_start)) {
 		if (entry->complete)
 			entry->complete(adapter, entry);
 		goto out;
