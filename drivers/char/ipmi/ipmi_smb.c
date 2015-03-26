@@ -2227,7 +2227,7 @@ static int init_ipmi_ssif(void)
 		rv = new_ssif_client(addr[i], adapter_name[i],
 				     dbg[i], slave_addrs[i],
 				     SI_HARDCODED);
-		if (!rv)
+		if (rv)
 			pr_err(PFX "Unable to add hardcoded SMBus device"
 			       " at address 0x%x\n", addr[i]);
 	}
