@@ -2183,7 +2183,6 @@ dont_test_tx_en:
 	serial_port_in(port, UART_RX);
 	serial_port_in(port, UART_IIR);
 	serial_port_in(port, UART_MSR);
-	spin_lock_init(&up->lsr_lock);
 	up->lsr_saved_flags = 0;
 	up->msr_saved_flags = 0;
 
@@ -2867,6 +2866,7 @@ static void __init serial8250_isa_init_ports(void)
 
 		port->line = i;
 		spin_lock_init(&port->lock);
+		spin_lock_init(&up->lsr_lock);
 
 		init_timer(&up->timer);
 		up->timer.function = serial8250_timeout;

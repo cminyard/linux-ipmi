@@ -290,6 +290,7 @@ static int dw8250_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&uart.port.lock);
+	spin_lock_init(&uart.lsr_lock);
 	uart.port.mapbase = regs->start;
 	uart.port.irq = irq->start;
 	uart.port.handle_irq = dw8250_handle_irq;
