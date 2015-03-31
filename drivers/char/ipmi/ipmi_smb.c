@@ -1419,6 +1419,23 @@ static const struct file_operations smi_stats_proc_ops = {
 DEFINE_MUTEX(ssif_infos_mutex);
 static LIST_HEAD(ssif_infos);
 
+static int strcmp_nospace(char *s1, char *s2)
+{
+	while (*s1 && *s2) {
+		while (isspace(*s1))
+			s1++;
+		while (isspace(*s2))
+			s2++;
+		if (*s1 > *s2)
+			return 1;
+		if (*s1 < *s2)
+			return -1;
+		s1++;
+		s2++;
+	}
+	return 0;
+}
+
 static struct ssif_client_info *ssif_info_find(unsigned short addr,
 					       char *adapter_name,
 					       bool match_null_name)
@@ -1433,7 +1450,8 @@ restart:
 					/* One is NULL and one is not */
 					continue;
 				}
-				if (strcmp(info->adapter_name, adapter_name))
+				if (strcmp_nospace(info->adapter_name,
+						   adapter_name))
 					/* Names to not match */
 					continue;
 			}
