@@ -299,7 +299,7 @@ static int i801_terminate_transaction(struct i801_priv *priv)
 		return 0;
 
 	outb_p(inb_p(SMBHSTCNT(priv)) | SMBHSTCNT_KILL, SMBHSTCNT(priv));
-	usleep_range(1000, 2000);
+	udelay(1000); /* FIXME - need another way to do this. */
 	outb_p(inb_p(SMBHSTCNT(priv)) & (~SMBHSTCNT_KILL), SMBHSTCNT(priv));
 
 	/* Check if it worked */
