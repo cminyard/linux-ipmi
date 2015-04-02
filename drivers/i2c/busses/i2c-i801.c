@@ -292,7 +292,7 @@ static int i801_terminate_transaction(struct i801_priv *priv)
 		return 0;
 
 	outb_p(inb_p(SMBHSTCNT(priv)) | SMBHSTCNT_KILL, SMBHSTCNT(priv));
-	usleep_range(1000, 2000);
+	udelay(1000); /* FIXME - need another way to do this. */
 	outb_p(inb_p(SMBHSTCNT(priv)) & (~SMBHSTCNT_KILL), SMBHSTCNT(priv));
 	
 	/* Check if it worked */
@@ -653,11 +653,9 @@ static s32 i801_setup(struct i801_priv *priv, u16 addr, u8 command, int size)
 		/* NB: page 240 of ICH5 datasheet shows that the R/#W
 		 * bit should be cleared here, even when reading */
 		outb_p((addr & 0x7f) << 1, SMBHSTADD(priv));
-		if (priv->is_read) {
+		if (!priv->is_read) {
 			unsigned char thostc;
-			/* NB: page 240 of ICH5 datasheet also shows
-			 * that DATA1 is the cmd field when reading */
-			outb_p(command, SMBHSTDAT1(priv));
+			outb_p(command, SMBHSTCMD(priv));
 			/* set I2C_EN bit in configuration register */
 			pci_read_config_byte(priv->pci_dev, SMBHSTCFG, &thostc);
 			pci_write_config_byte(priv->pci_dev, SMBHSTCFG,
@@ -668,7 +666,9 @@ static s32 i801_setup(struct i801_priv *priv, u16 addr, u8 command, int size)
 				"I2C block read is unsupported!\n");
 			return -EOPNOTSUPP;
 		} else
-			outb_p(command, SMBHSTCMD(priv));
+			/* NB: page 240 of ICH5 datasheet also shows
+			 * that DATA1 is the cmd field when reading */
+			outb_p(command, SMBHSTDAT1(priv));
 		priv->block = 1;
 		break;
 	default:
