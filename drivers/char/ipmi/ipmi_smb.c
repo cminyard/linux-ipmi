@@ -226,7 +226,16 @@ struct ssif_info {
 #define WDT_PRE_TIMEOUT_INT	0x08
 	unsigned char       msg_flags;
 
+	u8		    global_enables;
 	bool		    has_event_buffer;
+	bool		    supports_alert;
+
+	/*
+	 * Used to tell what we should do with alerts.  If we are
+	 * waiting on a response, read the data immediately.
+	 */
+	bool		    got_alert;
+	bool		    waiting_alert;
 
 	/*
 	 * If set to true, this will request events the next time the
@@ -621,9 +630,8 @@ static int ssif_i2c_send(struct ssif_info *ssif_info,
 static void msg_done_handler(struct ssif_info *ssif_info, int result,
 			     unsigned char *data, unsigned int len);
 
-static void retry_timeout(unsigned long data)
+static void start_get(struct ssif_info *ssif_info)
 {
-	struct ssif_info *ssif_info = (void *) data;
 	int rv;
 
 	ssif_info->rtc_us_timer = 0;
@@ -635,10 +643,48 @@ static void retry_timeout(unsigned long data)
 	if (rv < 0) {
 		/* request failed, just return the error. */
 		if (ssif_info->ssif_debug & SSIF_DEBUG_MSG)
-			pr_info("Error from i2c_non_blocking_op(5)\n");
+			pr_info("Error from ssif_i2c_send(5)\n");
 
 		msg_done_handler(ssif_info, -EIO, NULL, 0);
 	}
+}
+
+static void retry_timeout(unsigned long data)
+{
+	struct ssif_info *ssif_info = (void *) data;
+	unsigned long oflags, *flags;
+	bool waiting;
+
+	if (ssif_info->stopping)
+		return;
+
+	flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
+	waiting = ssif_info->waiting_alert;
+	ssif_info->waiting_alert = false;
+	ipmi_ssif_unlock_cond(ssif_info, flags);
+
+	if (waiting)
+		start_get(ssif_info);
+}
+
+
+static void ssif_alert(struct i2c_client *client, unsigned int data)
+{
+	struct ssif_info *ssif_info = i2c_get_clientdata(client);
+	unsigned long oflags, *flags;
+	bool do_get = false;
+
+	flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
+	if (ssif_info->waiting_alert) {
+		ssif_info->waiting_alert = false;
+		del_timer(&ssif_info->retry_timer);
+		do_get = true;
+	} else if (ssif_info->curr_msg) {
+		ssif_info->got_alert = true;
+	}
+	ipmi_ssif_unlock_cond(ssif_info, flags);
+	if (do_get)
+		start_get(ssif_info);
 }
 
 static int start_resend(struct ssif_info *ssif_info);
@@ -660,9 +706,12 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 		if (ssif_info->retries_left > 0) {
 			ssif_inc_stat(ssif_info, receive_retries);
 
+			flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
+			ssif_info->waiting_alert = true;
+			ssif_info->rtc_us_timer = SSIF_MSG_USEC;
 			mod_timer(&ssif_info->retry_timer,
 				  jiffies + SSIF_MSG_JIFFIES);
-			ssif_info->rtc_us_timer = SSIF_MSG_USEC;
+			ipmi_ssif_unlock_cond(ssif_info, flags);
 			return;
 		}
 
@@ -972,15 +1021,32 @@ static void msg_written_handler(struct ssif_info *ssif_info, int result,
 			msg_done_handler(ssif_info, -EIO, NULL, 0);
 		}
 	} else {
+		unsigned long oflags, *flags;
+		bool got_alert;
+
 		ssif_inc_stat(ssif_info, sent_messages);
 		ssif_inc_stat(ssif_info, sent_messages_parts);
 
-		/* Wait a jiffie then request the next message */
-		ssif_info->retries_left = SSIF_RECV_RETRIES;
-		ssif_info->rtc_us_timer = SSIF_MSG_PART_USEC;
-		mod_timer(&ssif_info->retry_timer,
-			  jiffies + SSIF_MSG_PART_JIFFIES);
-		return;
+		flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
+		got_alert = ssif_info->got_alert;
+		if (got_alert) {
+			ssif_info->got_alert = false;
+			ssif_info->waiting_alert = false;
+		}
+
+		if (got_alert) {
+			ipmi_ssif_unlock_cond(ssif_info, flags);
+			/* The alert already happened, try now. */
+			retry_timeout((unsigned long) ssif_info);
+		} else {
+			/* Wait a jiffie then request the next message */
+			ssif_info->waiting_alert = true;
+			ssif_info->retries_left = SSIF_RECV_RETRIES;
+			ssif_info->rtc_us_timer = SSIF_MSG_PART_USEC;
+			mod_timer(&ssif_info->retry_timer,
+				  jiffies + SSIF_MSG_PART_JIFFIES);
+			ipmi_ssif_unlock_cond(ssif_info, flags);
+		}
 	}
 }
 
@@ -988,6 +1054,8 @@ static int start_resend(struct ssif_info *ssif_info)
 {
 	int rv;
 	int command;
+
+	ssif_info->got_alert = false;
 
 	if (ssif_info->data_len > 32) {
 		command = SSIF_IPMI_MULTI_PART_REQUEST_START;
@@ -1189,12 +1257,6 @@ static int ssif_start_processing(void       *send_info,
 	ssif_info->intf = intf;
 
 	return 0;
-}
-
-static void ssif_alert(struct i2c_client *client, unsigned int data)
-{
-	struct ssif_info *ssif_info = i2c_get_clientdata(client);
-	request_events(ssif_info);
 }
 
 #define MAX_SSIF_BMCS 4
@@ -1490,6 +1552,12 @@ static bool check_acpi(struct ssif_info *ssif_info, struct device *dev)
 	return false;
 }
 
+/*
+ * Global enables we care about.
+ */
+#define GLOBAL_ENABLES_MASK (IPMI_BMC_EVT_MSG_BUFF | IPMI_BMC_RCV_MSG_INTR | \
+			     IPMI_BMC_EVT_MSG_INTR)
+
 static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	unsigned char     msg[3];
@@ -1499,7 +1567,6 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	int               len;
 	int               i;
 	u8		  slave_addr = 0;
-	u8		  flags;
 	struct ssif_client_info *info = NULL;
 
 
@@ -1650,12 +1717,12 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		goto found;
 	}
 
-	flags = resp[3];
+	ssif_info->global_enables = resp[3];
 
 	/* Check if the event message buffer is present. */
 	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
 	msg[1] = IPMI_SET_BMC_GLOBAL_ENABLES_CMD;
-	msg[2] = flags | IPMI_BMC_EVT_MSG_BUFF;
+	msg[2] = ssif_info->global_enables | IPMI_BMC_EVT_MSG_BUFF;
 	rv = do_cmd(client, 3, msg, &len, resp);
 	if (rv || (len < 2)) {
 		pr_warn(PFX "Error setting event message buffer: %d %d\n",
@@ -1667,18 +1734,25 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	if (resp[2] == 0) {
 		/* A successful return means the event buffer is supported. */
 		ssif_info->has_event_buffer = true;
-		flags |= IPMI_BMC_EVT_MSG_BUFF;
+		ssif_info->global_enables |= IPMI_BMC_EVT_MSG_BUFF;
 	}
 
 	/* Enable other things so alerts tell us when stuff comes in. */
 	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
 	msg[1] = IPMI_SET_BMC_GLOBAL_ENABLES_CMD;
-	msg[2] = flags | IPMI_BMC_RCV_MSG_INTR | IPMI_BMC_RCV_MSG_INTR;
+	msg[2] = ssif_info->global_enables | IPMI_BMC_RCV_MSG_INTR;
 	rv = do_cmd(client, 3, msg, &len, resp);
 	if (rv || (len < 2) || (resp[2] != 0)) {
 		pr_warn(PFX "Error setting global enables: %d %d %2.2x\n",
 			rv, len, resp[2]);
 		rv = 0; /* Not fatal */
+		goto found;
+	}
+
+	if (resp[2] == 0) {
+		/* A successful return means the alert is supported. */
+		ssif_info->supports_alert = true;
+		ssif_info->global_enables |= IPMI_BMC_RCV_MSG_INTR;
 	}
 
  found:
@@ -2248,9 +2322,9 @@ static struct i2c_driver ssif_i2c_driver = {
 		.owner			= THIS_MODULE,
 		.name			= DEVICE_NAME
 	},
-	.alert		= ssif_alert,
 	.probe		= ssif_probe,
 	.remove		= ssif_remove,
+	.alert		= ssif_alert,
 	.id_table	= ssif_id,
 	.detect		= ssif_detect
 };
