@@ -178,6 +178,9 @@ enum ssif_stat_indexes {
 	/* Number of asyncronous messages received. */
 	SSIF_STAT_incoming_messages,
 
+	/* Number of alers received. */
+	SSIF_STAT_alerts,
+
 	/* Always add statistics before this value, it must be last. */
 	SSIF_NUM_STATS
 };
@@ -673,6 +676,8 @@ static void ssif_alert(struct i2c_client *client, unsigned int data)
 	struct ssif_info *ssif_info = i2c_get_clientdata(client);
 	unsigned long oflags, *flags;
 	bool do_get = false;
+
+	ssif_inc_stat(ssif_info, alerts);
 
 	flags = ipmi_ssif_lock_cond(ssif_info, &oflags);
 	if (ssif_info->waiting_alert) {
@@ -1468,6 +1473,8 @@ static int smi_stats_proc_show(struct seq_file *m, void *v)
 		   ssif_get_stat(ssif_info, hosed));
 	seq_printf(m, "events:                 %u\n",
 		   ssif_get_stat(ssif_info, events));
+	seq_printf(m, "alerts:                 %u\n",
+		   ssif_get_stat(ssif_info, alerts));
 	return 0;
 }
 
