@@ -28,6 +28,7 @@
 #include <linux/i2c.h>
 #include <linux/i2c-smbus.h>
 #include <linux/slab.h>
+#include <linux/ctype.h>
 
 struct i2c_smbus_alert {
 	unsigned int		alert_edge_triggered:1;
@@ -80,34 +81,36 @@ static void smbus_alert(struct work_struct *work)
 {
 	struct i2c_smbus_alert *alert;
 	struct i2c_client *ara;
-	unsigned short prev_addr = 0;	/* Not a valid address */
+	s32 status;
 
 	alert = container_of(work, struct i2c_smbus_alert, alert);
 	ara = alert->ara;
 
-	for (;;) {
-		s32 status;
+	/*
+	 * Devices with pending alerts reply in address order, low
+	 * to high, because of slave transmit arbitration.  After
+	 * responding, an SMBus device stops asserting SMBALERT#.
+	 *
+	 * Note that SMBus 2.0 reserves 10-bit addresess for future
+	 * use.  We neither handle them, nor try to use PEC here.
+	 */
+	status = i2c_smbus_read_byte(ara);
+	while (status >= 0) {
 		struct alert_data data;
-
-		/*
-		 * Devices with pending alerts reply in address order, low
-		 * to high, because of slave transmit arbitration.  After
-		 * responding, an SMBus device stops asserting SMBALERT#.
-		 *
-		 * Note that SMBus 2.0 reserves 10-bit addresess for future
-		 * use.  We neither handle them, nor try to use PEC here.
-		 */
-		status = i2c_smbus_read_byte(ara);
-		if (status < 0)
-			break;
 
 		data.flag = status & 1;
 		data.addr = status >> 1;
 
-		if (data.addr == prev_addr) {
+		status = i2c_smbus_read_byte(ara);
+
+		/*
+		 * Check for duplicates before calling the handler, the
+		 * handler may cause the same alert to be sent.
+		 */
+		if (status >= 0 && data.addr == status >> 1) {
 			dev_warn(&ara->dev, "Duplicate SMBALERT# from dev "
 				"0x%02x, skipping\n", data.addr);
-			break;
+			status = -1;
 		}
 		dev_dbg(&ara->dev, "SMBALERT# from dev 0x%02x, flag %d\n",
 			data.addr, data.flag);
@@ -115,7 +118,6 @@ static void smbus_alert(struct work_struct *work)
 		/* Notify driver for the device which issued the alert */
 		device_for_each_child(&ara->adapter->dev, &data,
 				      smbus_do_alert);
-		prev_addr = data.addr;
 	}
 
 	/* We handled all alerts; re-enable level-triggered IRQs */
