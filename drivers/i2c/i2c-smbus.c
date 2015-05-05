@@ -23,6 +23,7 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+#include <linux/ctype.h>
 
 struct i2c_smbus_alert {
 	unsigned int		alert_edge_triggered:1;
@@ -125,14 +126,85 @@ static irqreturn_t smbalert_irq(int irq, void *d)
 	return IRQ_HANDLED;
 }
 
+static struct i2c_smbus_alert_setup *smbalert_parse_parms(struct device *dev,
+		const char *parms,
+		struct i2c_smbus_alert_setup *data)
+{
+	int rv;
+	char end;
+
+	if (!parms)
+		return NULL;
+
+	data->alert_edge_triggered = false;
+	while (*parms) {
+		const char *next = parms;
+		const char *val;
+		int parmlen;
+
+		while (*next && !isspace(*next) && *next != '=')
+			next++;
+
+		parmlen = next - parms;
+
+		if (*next == '=') {
+			next++;
+			val = next;
+			while (*next && !isspace(*next))
+				next++;
+		} else {
+			val = NULL;
+		}
+
+		if (strncmp(parms, "irq", parmlen) == 0) {
+			if (!val) {
+				dev_err(dev, "no irq parm value given\n");
+				return NULL;
+			}
+			rv = sscanf(val, "%d%c", &data->irq, &end);
+			if ((rv < 1) || ((rv > 1) && !isspace(end))) {
+				dev_err(dev, "Invalid irq parm: %s\n", val);
+				return NULL;
+			}
+		} else if (strncmp(parms, "edge", parmlen) == 0) {
+			if (val) {
+				dev_err(dev, "Value given with edge parm: %s\n",
+					val);
+				return NULL;
+			}
+			data->alert_edge_triggered = true;
+		} else {
+			dev_err(dev, "Invalid parameter: %s\n", parms);
+			return NULL;
+		}
+
+		while (*next && isspace(*next))
+			next++;
+		parms = next;
+	}
+
+	return data;
+}
+
 /* Setup SMBALERT# infrastructure */
 static int smbalert_probe(struct i2c_client *ara,
 			  const struct i2c_device_id *id)
 {
 	struct i2c_smbus_alert_setup *setup = dev_get_platdata(&ara->dev);
+	struct i2c_smbus_alert_setup dummy_setup;
 	struct i2c_smbus_alert *alert;
 	struct i2c_adapter *adapter = ara->adapter;
 	int res;
+
+	if (ara->parms)
+		/* Came in through sysfs. */
+		setup = smbalert_parse_parms(&ara->dev, ara->parms,
+					     &dummy_setup);
+
+	if (!setup) {
+		dev_err(&ara->dev, "SMBus alert without setup\n");
+		return -ENODEV;
+	}
 
 	alert = devm_kzalloc(&ara->dev, sizeof(struct i2c_smbus_alert),
 			     GFP_KERNEL);
