@@ -249,4 +249,54 @@ int ipmi_smi_add_proc_entry(ipmi_smi_t smi, char *name,
 			    const struct file_operations *proc_ops,
 			    void *data);
 
+/*
+ * Code used to implement black lists based upon manufacturer id,
+ * product id, and firmware version.
+ *
+ * To use this, create an array of struct ipmi_fw_revision_range and
+ * add items with the specific ids and firmware range.  If it affects
+ * all firmware versions, use 0,0,255,255 for the start and end
+ * revisions.  End the list with a blank entry, like follows:
+ * static struct ipmi_fw_revision_range ssif_broken_alert_bmcs[] = {
+ *	{
+ *		MY_MANUFACTURER_ID,
+ *		MY_PRODUCT_ID,
+ *		0, 0, 255, 255
+ *	},
+ *	{ }
+ * };
+ * Pass this and a device id structure into device_id_in_fw_revision_range(),
+ * it will return true if it matches and false if not.
+ */
+struct ipmi_fw_revision_range {
+	unsigned int manufacturer_id;
+	unsigned int product_id;
+	unsigned int start_fw_revision_1;
+	unsigned int start_fw_revision_2;
+	unsigned int end_fw_revision_1;
+	unsigned int end_fw_revision_2;
+};
+
+#define IPMI_FW_REV_CMP(cmp, type, id, ba)				\
+	(((id)->firmware_revision_1 cmp (ba)->type##_fw_revision_1 ||	\
+	  ((id)->firmware_revision_1 == (ba)->type##_fw_revision_1 &&	\
+	   (id)->firmware_revision_2 cmp##= (ba)->type##_fw_revision_2)))
+
+static inline bool
+device_id_in_fw_revision_range(const struct ipmi_device_id *id,
+			       struct ipmi_fw_revision_range *ba)
+{
+	int i;
+
+	for (i = 0; ba[i].manufacturer_id; i++) {
+		if (ba[i].manufacturer_id == id->manufacturer_id &&
+		    ba[i].product_id == id->product_id &&
+		    IPMI_FW_REV_CMP(>, start, id, &ba[i]) &&
+		    IPMI_FW_REV_CMP(<, end, id, &ba[i]))
+			return true;
+	}
+
+	return false;
+}
+
 #endif /* __LINUX_IPMI_SMI_H */
