@@ -3427,8 +3427,27 @@ static void setup_xaction_handlers(struct smi_info *smi_info)
 	setup_dell_poweredge_bt_xaction_handler(smi_info);
 }
 
+#define MY_MANUFACTURER_ID	0x1
+#define MY_PRODUCT_ID	0x1
+
+static struct ipmi_fw_revision_range ipmi_si_broken_irqs[] = {
+	{
+		MY_MANUFACTURER_ID,
+		MY_PRODUCT_ID,
+		0, 0, 255, 255
+	},
+	{ } /* End marker */
+};
+
 static void check_for_broken_irqs(struct smi_info *smi_info)
 {
+	if (device_id_in_fw_revision_range(&smi_info->device_id,
+					   ipmi_si_broken_irqs)) {
+		dev_info(smi_info->dev,
+			 "Device has broken irqs, disabling irqs");
+		smi_info->irq = 0;
+	}
+
 	check_clr_rcv_irq(smi_info);
 	check_set_rcv_irq(smi_info);
 }
