@@ -274,6 +274,9 @@ struct ssif_info {
 	unsigned char *i2c_data;
 	unsigned int i2c_size;
 
+	/* From the device id response. */
+	struct ipmi_device_id device_id;
+
 	struct timer_list retry_timer;
 	int retries_left;
 
@@ -1704,6 +1707,21 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		 "Trying %s-specified SSIF interface at i2c address 0x%x, adapter %s, slave address 0x%x\n",
 		ipmi_addr_src_to_str(ssif_info->addr_source),
 		client->addr, client->adapter->name, slave_addr);
+
+	/*
+	 * Do a Get Device ID command, since it comes back with some
+	 * useful info.
+	 */
+	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
+	msg[1] = IPMI_GET_DEVICE_ID_CMD;
+	rv = do_cmd(client, 2, msg, &len, resp);
+	if (rv)
+		goto out;
+
+	rv = ipmi_demangle_device_id(resp[0] >> 2, resp[1],
+			resp + 2, len - 2, &ssif_info->device_id);
+	if (rv)
+		goto out;
 
 	ssif_info->client = client;
 	i2c_set_clientdata(client, ssif_info);
