@@ -1482,6 +1482,18 @@ static int find_slave_address(struct i2c_client *client, int slave_addr)
 	return slave_addr;
 }
 
+#define IPMI_CAVIUM_MANUFACTURER_ID	0x1
+#define IPMI_CAVIUM_THUNDERX_PRODUCT_ID	0x1
+
+static struct ipmi_fw_revision_range ssif_broken_alert_bmcs[] = {
+	{
+		IPMI_CAVIUM_MANUFACTURER_ID,
+		IPMI_CAVIUM_THUNDERX_PRODUCT_ID,
+		0, 0, 1, 1
+	},
+	{ } /* End marker */
+};
+
 /*
  * Global enables we care about.
  */
@@ -1672,7 +1684,9 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	}
 
 	/* Some systems don't behave well if you enable alerts. */
-	if (alerts_broken)
+	if (alerts_broken ||
+	    device_id_in_fw_revision_range(&ssif_info->device_id,
+					   ssif_broken_alert_bmcs))
 		goto found;
 
 	msg[0] = IPMI_NETFN_APP_REQUEST << 2;
