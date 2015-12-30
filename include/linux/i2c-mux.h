@@ -33,14 +33,34 @@
  * and deselect callback functions to perform hardware-specific
  * mux control.
  */
+typedef int (*i2c_mux_select_cb)(struct i2c_adapter *,
+				 void *mux_priv, u32 chan_id);
 struct i2c_adapter *i2c_add_mux_adapter(struct i2c_adapter *parent,
 				struct device *mux_dev,
 				void *mux_priv, u32 force_nr, u32 chan_id,
 				unsigned int class,
-				int (*select) (struct i2c_adapter *,
-					       void *mux_dev, u32 chan_id),
-				int (*deselect) (struct i2c_adapter *,
-						 void *mux_dev, u32 chan_id));
+				i2c_mux_select_cb select,
+				i2c_mux_select_cb deselect);
+
+/*
+ * Delayed select, like above, but the select functions do not
+ * operate immediately, they (may) require some time to operate and
+ * tell the mux layer when they are done through a callback.
+ *
+ * If the callback returns 1, the operation occured immediately
+ * and no callback will be called.
+ */
+typedef int (*i2c_mux_delayed_select_cb)(struct i2c_adapter *,
+					 void *mux_priv, u32 chan_id,
+					 void *cb_data,
+					 void (*cb)(void *, int));
+struct i2c_adapter *i2c_add_mux_adapter_delayed_select(
+				struct i2c_adapter *parent,
+				struct device *mux_dev,
+				void *mux_priv, u32 force_nr, u32 chan_id,
+				unsigned int class,
+				i2c_mux_delayed_select_cb select,
+				i2c_mux_delayed_select_cb deselect);
 
 void i2c_del_mux_adapter(struct i2c_adapter *adap);
 

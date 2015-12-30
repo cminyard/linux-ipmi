@@ -35,8 +35,13 @@ struct i2c_mux_priv {
 	void *mux_priv;	/* the mux chip/device */
 	u32  chan_id;	/* the channel id */
 
-	int (*select)(struct i2c_adapter *, void *mux_priv, u32 chan_id);
-	int (*deselect)(struct i2c_adapter *, void *mux_priv, u32 chan_id);
+	bool use_smbus;
+	struct i2c_op_q_entry *curr_op;
+	
+	i2c_mux_select_cb select;
+	i2c_mux_select_cb deselect;
+	i2c_mux_delayed_select_cb d_select;
+	i2c_mux_delayed_select_cb d_deselect;
 };
 
 static int i2c_mux_master_xfer(struct i2c_adapter *adap,
@@ -78,40 +83,162 @@ static int i2c_mux_smbus_xfer(struct i2c_adapter *adap,
 	return ret;
 }
 
-static int i2c_mux_master_start(struct i2c_adapter    *adap,
-				struct i2c_op_q_entry *entry)
+static void i2c_mux_deselect_done(void *cb_data, int ret)
 {
-	struct i2c_mux_priv *priv = adap->algo_data;
+	struct i2c_mux_priv *priv = cb_data;
+	struct i2c_op_q_entry *entry = priv->curr_op;
+
+	if (ret < 0)
+		dev_err(&priv->parent->dev,
+			"deselect(2) failed for channel %d\n", priv->chan_id);
+	priv->curr_op = NULL;
+	i2c_op_done(entry);
+}
+
+/*
+ * Returns -1 on error, 0 on delayed start, and 1 on immedate deselect.
+ */
+static int i2c_mux_start_deselect(struct i2c_mux_priv *priv,
+				  struct i2c_op_q_entry *entry)
+{
+	struct i2c_adapter *parent = priv->parent;
+	int ret = 1;
+
+	if (priv->d_deselect)
+		ret = priv->d_deselect(parent, priv->mux_priv,
+				       priv->chan_id,
+				       priv, i2c_mux_deselect_done);
+	else
+		priv->deselect(parent, priv->mux_priv, priv->chan_id);
+
+	if (ret)
+		i2c_mux_deselect_done(priv, ret);
+
+	return ret;
+}
+	
+static void i2c_mux_op_done(struct i2c_adapter *parent,
+			    struct i2c_op_q_entry *entry)
+{
+	struct i2c_mux_priv *priv = parent->op_done_data;
+
+	BUG_ON(entry != priv->curr_op);
+	parent->op_done_handler = NULL;
+	i2c_mux_start_deselect(priv, entry);
+}
+
+static int i2c_mux_do_start(struct i2c_mux_priv *priv)
+{
+	struct i2c_adapter *parent = priv->parent;
+	struct i2c_op_q_entry *entry = priv->curr_op;
+	int ret;
+
+	if (priv->deselect || priv->d_deselect) {
+		/*
+		 * Catch the op finish ourself so we can start the
+		 * deselect process.
+		 */
+		parent->op_done_handler = i2c_mux_op_done;
+		parent->op_done_data = priv;
+	} else {
+		/*
+		 * We are done, just run th eop.
+		 */
+		priv->curr_op = NULL;
+	}
+	if (priv->use_smbus)
+		ret = parent->algo->smbus_start(parent, entry);
+	else
+		ret = parent->algo->master_start(parent, entry);
+
+	if (ret) {
+		entry->result = ret;
+		parent->op_done_handler = NULL;
+	}
+	return ret;
+}
+
+static void i2c_mux_select_done(void *cb_data, int ret)
+{
+	struct i2c_mux_priv *priv = cb_data;
+	struct i2c_op_q_entry *entry = priv->curr_op;
+
+	if (ret) {
+		dev_err(&priv->parent->dev,
+			"select failed for channel %d\n", priv->chan_id);
+		entry->result = ret;
+		i2c_mux_deselect_done(priv, 0);
+		return;
+	}
+
+	ret = i2c_mux_do_start(priv);
+	if (ret)
+		i2c_mux_start_deselect(priv, entry);
+}
+
+static int i2c_mux_start(struct i2c_mux_priv *priv,
+			 struct i2c_op_q_entry *entry)
+{
 	struct i2c_adapter *parent = priv->parent;
 	int ret;
 
-	/* Switch to the right mux port and perform the transfer. */
+	priv->curr_op = entry;
 
-	ret = priv->select(parent, priv->mux_priv, priv->chan_id);
-	if (ret >= 0)
-		ret = parent->algo->master_start(adap, entry);
-	if (priv->deselect)
-		priv->deselect(parent, priv->mux_priv, priv->chan_id);
+	/* Select the right mux port and perform the transfer. */
 
+	if (priv->d_select) {
+		ret = priv->d_select(parent, priv->mux_priv, priv->chan_id,
+				     priv, i2c_mux_select_done);
+		/*
+		 * If d_select returns 1, the select was immediate.
+		 * Otherwise we return the error or just return and
+		 * let the delayed handling do this.
+		 */
+		if (ret <= 0)
+			return ret;
+	} else {
+		ret = priv->select(parent, priv->mux_priv, priv->chan_id);
+	}
+	if (ret >= 0) {
+		ret = i2c_mux_do_start(priv);
+		if (ret) {
+			int ret2;
+			
+			entry->result = ret;
+			ret2 = i2c_mux_start_deselect(priv, entry);
+			if (ret2 == 0)
+				/*
+				 * Delayed deselect, it will return the
+				 * result later.
+				 */
+				ret = 0;
+			else
+				priv->curr_op = NULL;
+			if (ret2 < 0)
+				dev_err(&priv->parent->dev,
+					"deselect(1) failed for channel %d\n",
+					priv->chan_id);
+		}
+	}
 	return ret;
+}
+
+static int i2c_mux_master_start(struct i2c_adapter *adap,
+				struct i2c_op_q_entry *entry)
+{
+	struct i2c_mux_priv *priv = adap->algo_data;
+
+	priv->use_smbus = false;
+	return i2c_mux_start(priv, entry);
 }
 
 static int i2c_mux_smbus_start(struct i2c_adapter *adap,
 			       struct i2c_op_q_entry *entry)
 {
 	struct i2c_mux_priv *priv = adap->algo_data;
-	struct i2c_adapter *parent = priv->parent;
-	int ret;
 
-	/* Select the right mux port and perform the transfer. */
-
-	ret = priv->select(parent, priv->mux_priv, priv->chan_id);
-	if (ret >= 0)
-		ret = parent->algo->smbus_start(adap, entry);
-	if (priv->deselect)
-		priv->deselect(parent, priv->mux_priv, priv->chan_id);
-
-	return ret;
+	priv->use_smbus = true;
+	return i2c_mux_start(priv, entry);
 }
 
 /* Return the parent's functionality */
@@ -136,14 +263,14 @@ static unsigned int i2c_mux_parent_classes(struct i2c_adapter *parent)
 	return class;
 }
 
-struct i2c_adapter *i2c_add_mux_adapter(struct i2c_adapter *parent,
+static struct i2c_adapter *_i2c_add_mux_adapter(struct i2c_adapter *parent,
 				struct device *mux_dev,
 				void *mux_priv, u32 force_nr, u32 chan_id,
 				unsigned int class,
-				int (*select) (struct i2c_adapter *,
-					       void *, u32),
-				int (*deselect) (struct i2c_adapter *,
-						 void *, u32))
+				i2c_mux_select_cb select,
+				i2c_mux_select_cb deselect,
+				i2c_mux_delayed_select_cb d_select,
+				i2c_mux_delayed_select_cb d_deselect)
 {
 	struct i2c_mux_priv *priv;
 	int ret;
@@ -158,6 +285,8 @@ struct i2c_adapter *i2c_add_mux_adapter(struct i2c_adapter *parent,
 	priv->chan_id = chan_id;
 	priv->select = select;
 	priv->deselect = deselect;
+	priv->d_select = d_select;
+	priv->d_deselect = d_deselect;
 
 	/* Need to do algo dynamically because we don't know ahead
 	 * of time what sort of physical adapter we'll be dealing with.
@@ -228,7 +357,33 @@ struct i2c_adapter *i2c_add_mux_adapter(struct i2c_adapter *parent,
 
 	return &priv->adap;
 }
+
+struct i2c_adapter *i2c_add_mux_adapter(struct i2c_adapter *parent,
+				struct device *mux_dev,
+				void *mux_priv, u32 force_nr, u32 chan_id,
+				unsigned int class,
+				i2c_mux_select_cb select,
+				i2c_mux_select_cb deselect)
+{
+	return _i2c_add_mux_adapter(parent, mux_dev, mux_priv, force_nr,
+				    chan_id, class,
+				    select, deselect, NULL, NULL);
+}
 EXPORT_SYMBOL_GPL(i2c_add_mux_adapter);
+
+struct i2c_adapter *i2c_add_mux_adapter_delayed_select(
+				struct i2c_adapter *parent,
+				struct device *mux_dev,
+				void *mux_priv, u32 force_nr, u32 chan_id,
+				unsigned int class,
+				i2c_mux_delayed_select_cb d_select,
+				i2c_mux_delayed_select_cb d_deselect)
+{
+	return _i2c_add_mux_adapter(parent, mux_dev, mux_priv, force_nr,
+				    chan_id, class,
+				    NULL, NULL, d_select, d_deselect);
+}
+EXPORT_SYMBOL_GPL(i2c_add_mux_adapter_delayed_select);
 
 void i2c_del_mux_adapter(struct i2c_adapter *adap)
 {

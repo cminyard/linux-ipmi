@@ -61,6 +61,13 @@ struct pca954x {
 	struct i2c_adapter *virt_adaps[PCA954X_MAX_NCHANS];
 
 	u8 last_chan;		/* last register value */
+
+	struct i2c_op_q_entry op_e;
+	union i2c_smbus_data op_data;
+	bool in_select;
+	u8 pending_chan;
+	void *cb_data;
+	void (*cb)(void *, int);
 };
 
 struct chip_desc {
@@ -126,6 +133,19 @@ static int pca954x_reg_write(struct i2c_adapter *adap,
 				     I2C_SMBUS_BYTE_DATA, NULL);
 }
 
+static int pca954x_d_reg_write(struct pca954x *data, struct i2c_adapter *adap,
+			       struct i2c_client *client, u8 val,
+			       void *cb_data,
+			       void (*cb)(void *, int))
+{
+	data->cb = cb;
+	data->cb_data = cb_data;
+	data->op_e.smbus.read_write = I2C_SMBUS_WRITE;
+	data->op_e.smbus.command = val;
+		
+	return i2c_non_blocking_op_head(client, &data->op_e);
+}
+
 static int pca954x_select_chan(struct i2c_adapter *adap,
 			       void *client, u32 chan)
 {
@@ -157,6 +177,75 @@ static int pca954x_deselect_mux(struct i2c_adapter *adap,
 	/* Deselect active channel */
 	data->last_chan = 0;
 	return pca954x_reg_write(adap, client, data->last_chan);
+}
+
+static void pca954x_op_done(struct i2c_op_q_entry *entry)
+{
+	struct pca954x *data = entry->handler_data;
+
+	if (data->in_select) {
+		if (entry->result == 0)
+			data->last_chan = data->pending_chan;
+		else
+			data->last_chan = 0; /* invalidate */
+	}
+	data->cb(data->cb_data, entry->result);
+}
+
+static int pca954x_d_select_chan(struct i2c_adapter *adap,
+				 void *client, u32 chan,
+				 void *cb_data,
+				 void (*cb)(void *, int))
+{
+	struct pca954x *data = i2c_get_clientdata(client);
+	const struct chip_desc *chip = &chips[data->type];
+	u8 regval;
+	int ret = 1; /* Positive means we selected immediately. */
+
+	/* we make switches look like muxes, not sure how to be smarter */
+	if (chip->muxtype == pca954x_ismux)
+		regval = chan | chip->enable;
+	else
+		regval = 1 << chan;
+
+	/* Only select the channel if its different from the last channel */
+	if (data->last_chan != regval) {
+		data->pending_chan = regval;
+		data->in_select = true;
+		ret = pca954x_d_reg_write(data, adap, client, regval,
+					  cb_data, cb);
+	}
+
+	return ret;
+}
+
+static int pca954x_d_deselect_mux(struct i2c_adapter *adap,
+				  void *client, u32 chan,
+				  void *cb_data,
+				  void (*cb)(void *, int))
+{
+	struct pca954x *data = i2c_get_clientdata(client);
+
+	data->last_chan = 0;
+	data->in_select = false;
+	return pca954x_d_reg_write(data, adap, client, data->last_chan,
+				   cb_data, cb);
+}
+
+static struct i2c_adapter *pca954x_add_mux_adapter(struct i2c_adapter *adap,
+						   struct i2c_client *client,
+						   int force, int num,
+						   int class, bool deselect)
+{
+	if (adap->algo->master_start || adap->algo->smbus_start)
+		return i2c_add_mux_adapter_delayed_select(adap, &client->dev,
+				client, force, num, class,
+				pca954x_d_select_chan,
+				deselect ? pca954x_d_deselect_mux : NULL);
+	else
+		return i2c_add_mux_adapter(adap, &client->dev, client,
+				force, num, class, pca954x_select_chan,
+				deselect ? pca954x_deselect_mux : NULL);
 }
 
 /*
@@ -198,6 +287,14 @@ static int pca954x_probe(struct i2c_client *client,
 	data->type = id->driver_data;
 	data->last_chan = 0;		   /* force the first selection */
 
+	data->op_e.xfer_type = I2C_OP_SMBUS;
+	data->op_e.handler = pca954x_op_done;
+	data->op_e.handler_data = data;
+	data->op_e.smbus.addr = client->addr;
+	data->op_e.smbus.flags = client->flags;
+	data->op_e.smbus.data = &data->op_data;
+	data->op_e.smbus.size = I2C_SMBUS_BYTE;
+
 	/* Now create an adapter for each channel */
 	for (num = 0; num < chips[data->type].nchans; num++) {
 		force = 0;			  /* dynamic adap number */
@@ -213,10 +310,9 @@ static int pca954x_probe(struct i2c_client *client,
 		}
 
 		data->virt_adaps[num] =
-			i2c_add_mux_adapter(adap, &client->dev, client,
-				force, num, class, pca954x_select_chan,
-				(pdata && pdata->modes[num].deselect_on_exit)
-					? pca954x_deselect_mux : NULL);
+			pca954x_add_mux_adapter(adap, client,
+				force, num, class,
+				pdata && pdata->modes[num].deselect_on_exit);
 
 		if (data->virt_adaps[num] == NULL) {
 			ret = -ENODEV;
