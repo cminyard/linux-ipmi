@@ -491,7 +491,7 @@ static int i801_check(struct i801_priv *priv, u8 status)
 		outb_p(status, SMBHSTSTS(priv));
 		priv->status |= status;
 		i801_op_done(priv, e);
-		i2c_entry_put(&priv->adapter, e);
+		i2c_entry_put(e);
 		return 1;
 	}
 	return 0;
@@ -687,7 +687,7 @@ static void i801_op_done(struct i801_priv *priv, struct i2c_op_q_entry *e)
 {
 	priv->done = 1;
 	e->result = i801_check_post(priv);
-	i2c_op_done(&priv->adapter, e);
+	i2c_op_done(e);
 }
 
 static void i801_poll(struct i2c_adapter *adap,

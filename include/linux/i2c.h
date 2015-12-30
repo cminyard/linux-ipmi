@@ -393,14 +393,13 @@ i2c_register_board_info(int busnum, struct i2c_board_info const *info,
  * must call i2c_entry_put() on it.
  */
 struct i2c_op_q_entry *i2c_entry_get(struct i2c_adapter *adap);
-void i2c_entry_put(struct i2c_adapter *adap,
-		   struct i2c_op_q_entry *entry);
+void i2c_entry_put(struct i2c_op_q_entry *entry);
 
 /*
  * Called from an non-blocking interface to report that an operation
  * has completed.  Can be called from interrupt context.
  */
-void i2c_op_done(struct i2c_adapter *adap, struct i2c_op_q_entry *entry);
+void i2c_op_done(struct i2c_op_q_entry *entry);
 
 /**
  * struct i2c_algorithm - represent I2C transfer method
@@ -519,15 +518,21 @@ struct i2c_adapter {
 
 	/* data fields that are valid for all devices	*/
 
-	struct list_head q;
-	spinlock_t q_lock;
-
-	struct hrtimer timer;
-
-	struct rt_mutex *bus_lock; /* Points to the topmost parent's lock */
+	/*
+	 * We only allow one operation to occur at a time for the entire
+	 * bus hierarchy.  So these items point to the topmost parent's
+	 * items and those are used for everything.
+	 */
+	struct rt_mutex *bus_lock;
+	struct list_head *q;
+	spinlock_t *q_lock;
+	struct hrtimer *timer;
 
 	/* Real fields, to put into the pointers above. */
 	struct rt_mutex real_bus_lock;
+	struct list_head real_q;
+	spinlock_t real_q_lock;
+	struct hrtimer real_timer;
 	
 	int timeout;			/* in jiffies */
 	int retries;
@@ -769,13 +774,14 @@ struct i2c_op_q_entry {
 
 	/**************************************************************/
 	/* Internals */
+	struct i2c_adapter *adap;
 	struct completion done;
 	unsigned long     end_jiffies;
 	unsigned int      tries;
 	unsigned char     use_timer;
 
 #define I2C_OP_QUEUED		0
-#define I2C_OP_INITIALIZED	1
+#define I2C_OP_RUNNING		1
 #define I2C_OP_FINISHED		2
 	unsigned char	  state;
 	u8                pec;

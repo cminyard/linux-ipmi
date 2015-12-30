@@ -445,7 +445,7 @@ static void piix4_poll(struct i2c_adapter *piix4_adapter,
 	}
 
  out_done:
-	i2c_op_done(piix4_adapter, e);
+	i2c_op_done(e);
 }
 
 /* Return negative errno on error. */
