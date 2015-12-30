@@ -81,6 +81,13 @@ extern s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 			  unsigned short flags, char read_write, u8 command,
 			  int size, union i2c_smbus_data *data);
 
+/* Like above, but don't claim any locks.  This is for mux use
+   only. */
+extern s32 i2c_smbus_xfer_nolock(struct i2c_adapter *adapter, u16 addr,
+			  unsigned short flags,
+			  char read_write, u8 command, int protocol,
+			  union i2c_smbus_data *data);
+
 /* Now follow the 'nice' access routines. These also document the calling
    conventions of i2c_smbus_xfer. */
 
