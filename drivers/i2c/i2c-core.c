@@ -1896,7 +1896,8 @@ static void i2c_perform_op_wait(struct i2c_adapter *adap,
 }
 
 static void i2c_transfer_entry(struct i2c_adapter *adap,
-			       struct i2c_op_q_entry *entry)
+			       struct i2c_op_q_entry *entry,
+			       bool do_lock)
 {
 #ifdef DEBUG
 	int ret;
@@ -1934,19 +1935,22 @@ static void i2c_transfer_entry(struct i2c_adapter *adap,
 	if (adap->algo->master_start)
 		i2c_perform_op_wait(adap, entry);
 	else if (adap->algo->master_xfer) {
-		if (in_atomic() || irqs_disabled()) {
-			if (!i2c_trylock_adapter(adap)) {
-				/* I2C activity is ongoing. */
-				entry->result = -EAGAIN;
-				return;
+		if (do_lock) {
+			if (in_atomic() || irqs_disabled()) {
+				if (!i2c_trylock_adapter(adap)) {
+					/* I2C activity is ongoing. */
+					entry->result = -EAGAIN;
+					return;
+				}
+			} else {
+				i2c_lock_adapter(adap);
 			}
-		} else {
-			i2c_lock_adapter(adap);
 		}
 
 		entry->result = __i2c_transfer(adap, entry->i2c.msgs,
 					       entry->i2c.num);
-		i2c_unlock_adapter(adap);
+		if (do_lock)
+			i2c_unlock_adapter(adap);
 		if (entry->complete)
 			entry->complete(adap, entry);
 	} else {
@@ -1981,7 +1985,7 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	entry->complete = NULL;
 	entry->handler = NULL;
 
-	i2c_transfer_entry(adap, entry);
+	i2c_transfer_entry(adap, entry, true);
 	rv = entry->result;
 	i2c_entry_put(adap, entry);
 	kfree(entry);
@@ -2732,9 +2736,11 @@ static int i2c_smbus_emu_format(struct i2c_adapter *adapter,
  * This executes an SMBus protocol operation, and returns a negative
  * errno code else zero on success.
  */
-s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
-		   char read_write, u8 command, int protocol,
-		   union i2c_smbus_data *data)
+static s32 _i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
+		unsigned short flags,
+		char read_write, u8 command, int protocol,
+		union i2c_smbus_data *data,
+		bool do_lock)
 {
 	unsigned long orig_jiffies;
 	int try;
@@ -2771,7 +2777,8 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	if (algo->smbus_start) {
 		i2c_perform_op_wait(adapter, entry);
 	} else if (algo->smbus_xfer) {
-		i2c_lock_adapter(adapter);
+		if (do_lock)
+			i2c_lock_adapter(adapter);
 
 		/* Retry automatically on arbitration loss */
 		orig_jiffies = jiffies;
@@ -2786,7 +2793,8 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 				       orig_jiffies + adapter->timeout))
 				break;
 		}
-		i2c_unlock_adapter(adapter);
+		if (do_lock)
+			i2c_unlock_adapter(adapter);
 	}
 
 	if (entry->result != -EOPNOTSUPP ||
@@ -2804,7 +2812,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	if (i2c_smbus_emu_format(adapter, entry)) {
 		entry->result = -EINVAL;
 	} else {
-		i2c_transfer_entry(adapter, entry);
+		i2c_transfer_entry(adapter, entry, do_lock);
 		/*
 		 * We get these back with the result being the
 		 * number of bytes transferred.  We want zero for
@@ -2828,7 +2836,25 @@ out:
 		res = 0; /* Always return 0 on success */
 	return res;
 }
+
+s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
+		   char read_write, u8 command, int protocol,
+		   union i2c_smbus_data *data)
+{
+	return _i2c_smbus_xfer(adapter, addr, flags, read_write, command,
+			       protocol, data, true);
+}
 EXPORT_SYMBOL(i2c_smbus_xfer);
+
+s32 i2c_smbus_xfer_nolock(struct i2c_adapter *adapter, u16 addr,
+		   unsigned short flags,
+		   char read_write, u8 command, int protocol,
+		   union i2c_smbus_data *data)
+{
+	return _i2c_smbus_xfer(adapter, addr, flags, read_write, command,
+			       protocol, data, false);
+}
+EXPORT_SYMBOL(i2c_smbus_xfer_nolock);
 
 /* ----------------------------------------------------
  * Entry handling
