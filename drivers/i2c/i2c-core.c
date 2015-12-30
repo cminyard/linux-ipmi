@@ -966,12 +966,7 @@ static int i2c_check_addr_busy(struct i2c_adapter *adapter, int addr)
  */
 void i2c_lock_adapter(struct i2c_adapter *adapter)
 {
-	struct i2c_adapter *parent = i2c_parent_is_i2c_adapter(adapter);
-
-	if (parent)
-		i2c_lock_adapter(parent);
-	else
-		rt_mutex_lock(&adapter->bus_lock);
+	rt_mutex_lock(adapter->bus_lock);
 }
 EXPORT_SYMBOL_GPL(i2c_lock_adapter);
 
@@ -981,12 +976,7 @@ EXPORT_SYMBOL_GPL(i2c_lock_adapter);
  */
 static int i2c_trylock_adapter(struct i2c_adapter *adapter)
 {
-	struct i2c_adapter *parent = i2c_parent_is_i2c_adapter(adapter);
-
-	if (parent)
-		return i2c_trylock_adapter(parent);
-	else
-		return rt_mutex_trylock(&adapter->bus_lock);
+	return rt_mutex_trylock(adapter->bus_lock);
 }
 
 /**
@@ -995,12 +985,7 @@ static int i2c_trylock_adapter(struct i2c_adapter *adapter)
  */
 void i2c_unlock_adapter(struct i2c_adapter *adapter)
 {
-	struct i2c_adapter *parent = i2c_parent_is_i2c_adapter(adapter);
-
-	if (parent)
-		i2c_unlock_adapter(parent);
-	else
-		rt_mutex_unlock(&adapter->bus_lock);
+	rt_mutex_unlock(adapter->bus_lock);
 }
 EXPORT_SYMBOL_GPL(i2c_unlock_adapter);
 
@@ -1547,6 +1532,7 @@ static int __process_new_adapter(struct device_driver *d, void *data)
 
 static int i2c_register_adapter(struct i2c_adapter *adap)
 {
+	struct i2c_adapter *parent = i2c_parent_is_i2c_adapter(adap);
 	int res = 0;
 
 	/* Can't register until after driver model init */
@@ -1567,9 +1553,15 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 		return -EINVAL;
 	}
 
-	rt_mutex_init(&adap->bus_lock);
 	mutex_init(&adap->userspace_clients_lock);
 	INIT_LIST_HEAD(&adap->userspace_clients);
+
+	if (parent) {
+		adap->bus_lock = parent->bus_lock;
+	} else {
+		rt_mutex_init(&adap->real_bus_lock);
+		adap->bus_lock = &adap->real_bus_lock;
+	}
 
 	/* Set default timeout to 1 second if not already set */
 	if (adap->timeout == 0)
