@@ -86,80 +86,36 @@ static const struct i2c_device_id pca9541_id[] = {
 MODULE_DEVICE_TABLE(i2c, pca9541_id);
 
 /*
- * Write to chip register. Don't use i2c_transfer()/i2c_smbus_xfer()
- * as they will try to lock the adapter a second time.
+ * Write to chip register.
+ * We already hold the lock, so use a special call.
  */
 static int pca9541_reg_write(struct i2c_client *client, u8 command, u8 val)
 {
 	struct i2c_adapter *adap = client->adapter;
-	int ret;
+	union i2c_smbus_data data;
 
-	if (adap->algo->master_xfer) {
-		struct i2c_msg msg;
-		char buf[2];
-
-		msg.addr = client->addr;
-		msg.flags = 0;
-		msg.len = 2;
-		buf[0] = command;
-		buf[1] = val;
-		msg.buf = buf;
-		ret = adap->algo->master_xfer(adap, &msg, 1);
-	} else {
-		union i2c_smbus_data data;
-
-		data.byte = val;
-		ret = adap->algo->smbus_xfer(adap, client->addr,
-					     client->flags,
-					     I2C_SMBUS_WRITE,
-					     command,
-					     I2C_SMBUS_BYTE_DATA, &data);
-	}
-
-	return ret;
+	data.byte = val;
+	return i2c_smbus_xfer_nolock(adap, client->addr, client->flags,
+				     I2C_SMBUS_WRITE, command,
+				     I2C_SMBUS_BYTE_DATA, &data);
 }
 
 /*
- * Read from chip register. Don't use i2c_transfer()/i2c_smbus_xfer()
- * as they will try to lock adapter a second time.
+ * Read from chip register.
+ * We already hold the lock, so use a special call.
  */
 static int pca9541_reg_read(struct i2c_client *client, u8 command)
 {
 	struct i2c_adapter *adap = client->adapter;
+	union i2c_smbus_data data;
 	int ret;
-	u8 val;
 
-	if (adap->algo->master_xfer) {
-		struct i2c_msg msg[2] = {
-			{
-				.addr = client->addr,
-				.flags = 0,
-				.len = 1,
-				.buf = &command
-			},
-			{
-				.addr = client->addr,
-				.flags = I2C_M_RD,
-				.len = 1,
-				.buf = &val
-			}
-		};
-		ret = adap->algo->master_xfer(adap, msg, 2);
-		if (ret == 2)
-			ret = val;
-		else if (ret >= 0)
-			ret = -EIO;
-	} else {
-		union i2c_smbus_data data;
+	ret = i2c_smbus_xfer_nolock(adap, client->addr, client->flags,
+				    I2C_SMBUS_READ, command,
+				    I2C_SMBUS_BYTE_DATA, &data);
+	if (!ret)
+		ret = data.byte;
 
-		ret = adap->algo->smbus_xfer(adap, client->addr,
-					     client->flags,
-					     I2C_SMBUS_READ,
-					     command,
-					     I2C_SMBUS_BYTE_DATA, &data);
-		if (!ret)
-			ret = data.byte;
-	}
 	return ret;
 }
 
