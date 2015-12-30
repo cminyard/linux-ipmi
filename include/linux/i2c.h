@@ -511,13 +511,17 @@ struct i2c_adapter {
 	void *algo_data;
 
 	/* data fields that are valid for all devices	*/
-	struct rt_mutex bus_lock;
 
 	struct list_head q;
 	spinlock_t q_lock;
 
 	struct hrtimer timer;
 
+	struct rt_mutex *bus_lock; /* Points to the topmost parent's lock */
+
+	/* Real fields, to put into the pointers above. */
+	struct rt_mutex real_bus_lock;
+	
 	int timeout;			/* in jiffies */
 	int retries;
 	struct device dev;		/* the adapter device */
