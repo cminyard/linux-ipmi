@@ -1228,6 +1228,7 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 		adap->real_timer.function = i2c_handle_timer;
 		adap->timer = &adap->real_timer; 
 	}
+	adap->op_done_handler = NULL;
 
 	/* Set default timeout to 1 second if not already set */
 	if (adap->timeout == 0)
@@ -2871,6 +2872,11 @@ void i2c_op_done(struct i2c_op_q_entry *entry)
 	struct i2c_adapter *adap = entry->adap;
 	unsigned long flags;
 
+	if (adap->op_done_handler) {
+		adap->op_done_handler(adap, entry);
+		return;
+	}
+
 	pr_debug("i2c_op_done: %p %p\n", adap, entry);
 	spin_lock_irqsave(adap->q_lock, flags);
 	/*
@@ -2925,8 +2931,9 @@ void i2c_poll(struct i2c_client *client,
 }
 EXPORT_SYMBOL(i2c_poll);
 
-int i2c_non_blocking_op(struct i2c_client *client,
-			struct i2c_op_q_entry *entry)
+static int _i2c_non_blocking_op(struct i2c_client *client,
+				struct i2c_op_q_entry *entry,
+				bool queue_head)
 {
 	unsigned long      flags;
 	struct i2c_adapter *adap = client->adapter;
@@ -2947,12 +2954,28 @@ int i2c_non_blocking_op(struct i2c_client *client,
 	i2c_init_entry(adap, entry);
 
 	spin_lock_irqsave(adap->q_lock, flags);
-	list_add_tail(&entry->link, adap->q);
+	if (queue_head)
+		list_add(&entry->link, adap->q);
+	else
+		list_add_tail(&entry->link, adap->q);
 	spin_unlock_irqrestore(adap->q_lock, flags);
 
 	return i2c_start_next_entry(adap, entry);
 }
+
+int i2c_non_blocking_op(struct i2c_client *client,
+			struct i2c_op_q_entry *entry)
+{
+	return _i2c_non_blocking_op(client, entry, false);
+}
 EXPORT_SYMBOL(i2c_non_blocking_op);
+
+int i2c_non_blocking_op_head(struct i2c_client *client,
+			     struct i2c_op_q_entry *entry)
+{
+	return _i2c_non_blocking_op(client, entry, true);
+}
+EXPORT_SYMBOL(i2c_non_blocking_op_head);
 
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus main module");
