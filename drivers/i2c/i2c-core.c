@@ -2966,8 +2966,10 @@ void i2c_op_done(struct i2c_op_q_entry *entry)
 	 * both discover that the operation is finished and both
 	 * report it.
 	 */
-	if (entry->state == I2C_OP_FINISHED)
-		goto out;
+	if (entry->state == I2C_OP_FINISHED) {
+		spin_unlock_irqrestore(adap->q_lock, flags);
+		goto out_put;
+	}
 
 	if (entry->result == -EAGAIN) {
 		/* Retry on arbitration loss, unless we timed out. */
@@ -2975,7 +2977,8 @@ void i2c_op_done(struct i2c_op_q_entry *entry)
 		if ((entry->tries <= adap->retries) ||
 				!time_after(jiffies, entry->end_jiffies)) {
 			entry->result = 0;
-			goto out;
+			spin_unlock_irqrestore(adap->q_lock, flags);
+			goto out_put;
 		}
 	}
 
@@ -2987,11 +2990,10 @@ void i2c_op_done(struct i2c_op_q_entry *entry)
 	if (entry->complete)
 		entry->complete(adap, entry);
 
-	i2c_entry_put(entry);
-
 	i2c_start_next_entry(adap, NULL);
-out:
-	return;
+
+out_put:
+	i2c_entry_put(entry);
 }
 EXPORT_SYMBOL(i2c_op_done);
 
