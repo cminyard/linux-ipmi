@@ -685,6 +685,8 @@ static s32 i801_setup(struct i801_priv *priv, u16 addr, u8 command, int size)
 
 static void i801_op_done(struct i801_priv *priv, struct i2c_op_q_entry *e)
 {
+	if (priv->done)
+		return;
 	priv->done = 1;
 	e->result = i801_check_post(priv);
 	i2c_op_done(e);
