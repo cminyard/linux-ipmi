@@ -1964,7 +1964,7 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 
 	i2c_transfer_entry(adap, entry, true);
 	rv = entry->result;
-	i2c_entry_put( entry);
+	i2c_entry_put(entry);
 	kfree(entry);
 	return rv;
 }
@@ -2772,12 +2772,12 @@ static s32 _i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 		}
 		if (do_lock)
 			i2c_unlock_adapter(adapter);
+		if (entry->complete)
+			entry->complete(adapter, entry);
 	}
 
 	if (entry->result != -EOPNOTSUPP ||
 	    (!adapter->algo->master_xfer && !adapter->algo->master_start)) {
-		if (entry->complete)
-			entry->complete(adapter, entry);
 		goto trace;
 	}
 
@@ -2887,7 +2887,7 @@ static int i2c_start_next_entry(struct i2c_adapter *adap,
 {
 	unsigned long flags;
 	struct i2c_op_q_entry *entry;
-	int ret = 0;
+	int ret = 0, result;
 
 next_entry:
 	/* Start the next entry, if there is one and it's not running. */
@@ -2902,27 +2902,33 @@ next_entry:
 	spin_unlock_irqrestore(adap->q_lock, flags);
 
 	if (!entry)
-		return 0;
+		return ret;
 
 	adap = entry->adap;
+	/*
+	 * Note: Do not assign to entry->result here.  The operations
+	 * may complete before the function returns (like on qemu with
+	 * immediate results) and it will assign the result incorrectly.
+	 */
 	switch (entry->xfer_type) {
 	case I2C_OP_I2C:
-		entry->result = adap->algo->master_start(adap, entry);
+		result = adap->algo->master_start(adap, entry);
 		break;
 	case I2C_OP_SMBUS:
-		entry->result = adap->algo->smbus_start(adap, entry);
+		result = adap->algo->smbus_start(adap, entry);
 		break;
 	default:
-		entry->result = -EINVAL;
+		result = -EINVAL;
 	}
 
-	if (entry->result) {
+	if (result) {
+		entry->result = result;
 		spin_lock_irqsave(adap->q_lock, flags);
 		entry->state = I2C_OP_FINISHED;
 		list_del(&entry->link);
 		spin_unlock_irqrestore(adap->q_lock, flags);
 
-		if (entry == myentry) {
+		if (entry != myentry) {
 			ret = entry->result;
 		} else {
 			if (entry->complete)
@@ -2936,7 +2942,7 @@ next_entry:
 	
 	if (entry->use_timer)
 		i2c_start_timer(entry);
-	return 0;
+	return ret;
 }
 
 static void i2c_op_release(struct kref *ref)
