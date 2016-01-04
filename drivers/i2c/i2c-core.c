@@ -2966,6 +2966,10 @@ void i2c_op_done(struct i2c_op_q_entry *entry)
 	unsigned long flags;
 
 	if (adap->op_done_handler) {
+		/*
+		 * Mux handlers intercept this an re-call when they
+		 * are finished with their mux handling.
+		 */
 		adap->op_done_handler(adap, entry);
 		return;
 	}
