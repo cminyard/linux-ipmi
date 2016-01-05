@@ -2700,19 +2700,6 @@ static int i2c_smbus_emu_format(struct i2c_adapter *adapter,
 	return 0;
 }
 
-/**
- * i2c_smbus_xfer - execute SMBus protocol operations
- * @adapter: Handle to I2C bus
- * @addr: Address of SMBus slave on that bus
- * @flags: I2C_CLIENT_* flags (usually zero or I2C_CLIENT_PEC)
- * @read_write: I2C_SMBUS_READ or I2C_SMBUS_WRITE
- * @command: Byte interpreted by slave, for protocols which use such bytes
- * @protocol: SMBus protocol operation to execute, such as I2C_SMBUS_PROC_CALL
- * @data: Data to be read or written
- *
- * This executes an SMBus protocol operation, and returns a negative
- * errno code else zero on success.
- */
 static s32 _i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 		unsigned short flags,
 		char read_write, u8 command, int protocol,
@@ -2814,6 +2801,19 @@ out:
 	return res;
 }
 
+/**
+ * i2c_smbus_xfer - execute SMBus protocol operations
+ * @adapter: Handle to I2C bus
+ * @addr: Address of SMBus slave on that bus
+ * @flags: I2C_CLIENT_* flags (usually zero or I2C_CLIENT_PEC)
+ * @read_write: I2C_SMBUS_READ or I2C_SMBUS_WRITE
+ * @command: Byte interpreted by slave, for protocols which use such bytes
+ * @protocol: SMBus protocol operation to execute, such as I2C_SMBUS_PROC_CALL
+ * @data: Data to be read or written
+ *
+ * This executes an SMBus protocol operation, and returns a negative
+ * errno code else zero on success.
+ */
 s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 		   char read_write, u8 command, int protocol,
 		   union i2c_smbus_data *data)
@@ -2823,6 +2823,21 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 }
 EXPORT_SYMBOL(i2c_smbus_xfer);
 
+/**
+ * i2c_smbus_xfer - execute SMBus protocol operations
+ * @adapter: Handle to I2C bus
+ * @addr: Address of SMBus slave on that bus
+ * @flags: I2C_CLIENT_* flags (usually zero or I2C_CLIENT_PEC)
+ * @read_write: I2C_SMBUS_READ or I2C_SMBUS_WRITE
+ * @command: Byte interpreted by slave, for protocols which use such bytes
+ * @protocol: SMBus protocol operation to execute, such as I2C_SMBUS_PROC_CALL
+ * @data: Data to be read or written
+ *
+ * This executes an SMBus protocol operation, and returns a negative
+ * errno code else zero on success.  It does not call this lock.  This
+ * is for the i2c-mux.c code so it can do i2c operations to set up muxes
+ * while the lock is held.
+ */
 s32 i2c_smbus_xfer_nolock(struct i2c_adapter *adapter, u16 addr,
 		   unsigned short flags,
 		   char read_write, u8 command, int protocol,
