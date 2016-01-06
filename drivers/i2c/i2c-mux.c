@@ -241,6 +241,16 @@ static int i2c_mux_smbus_start(struct i2c_adapter *adap,
 	return i2c_mux_start(priv, entry);
 }
 
+/*
+ * Just a dummy routine, but it needs to be here because i2c-core
+ * calls it if we have non-blocking capability.
+ */
+static void i2c_mux_poll(struct i2c_adapter *adap,
+			 struct i2c_op_q_entry *e,
+			 unsigned int ns_since_last_poll)
+{
+}
+
 /* Return the parent's functionality */
 static u32 i2c_mux_functionality(struct i2c_adapter *adap)
 {
@@ -299,6 +309,8 @@ static struct i2c_adapter *_i2c_add_mux_adapter(struct i2c_adapter *parent,
 		priv->algo.master_start = i2c_mux_master_start;
 	if (parent->algo->smbus_start)
 		priv->algo.smbus_start = i2c_mux_smbus_start;
+	if (parent->algo->poll)
+		priv->algo.poll = i2c_mux_poll;
 	priv->algo.functionality = i2c_mux_functionality;
 
 	/* Now fill out new adapter structure */
