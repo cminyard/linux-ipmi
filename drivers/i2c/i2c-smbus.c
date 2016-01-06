@@ -139,6 +139,7 @@ static struct i2c_smbus_alert_setup *smbalert_parse_parms(struct device *dev,
 	if (!parms)
 		return NULL;
 
+	data->alert_edge_triggered = false;
 	while (*parms) {
 		const char *next = parms;
 		const char *val;
