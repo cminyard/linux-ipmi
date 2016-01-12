@@ -96,6 +96,7 @@ struct pca9541 {
 	unsigned long timeout;
 
 	enum pca9541_state state;
+	uint8_t last_control_read;
 
 	struct i2c_op_q_entry op_e;
 	union i2c_smbus_data op_data;
@@ -403,6 +404,7 @@ static void pca9541_op_done(struct i2c_op_q_entry *entry)
 			 * other master requested ownership.
 			 */
 			data->state = pca9541_read_istat;
+			data->last_control_read = reg;
 			ret = pca9541_d_reg_read(data, PCA9541_ISTAT);
 		} else if (mybus(reg)) {
 			/*
@@ -440,12 +442,14 @@ static void pca9541_op_done(struct i2c_op_q_entry *entry)
 	case pca9541_read_istat:
 		if (!(reg & PCA9541_ISTAT_NMYTEST)
 		    || time_is_before_eq_jiffies(data->arb_timeout)) {
+			uint8_t oreg = data->last_control_read;
+
 			/*
 			 * Other master did not request ownership,
 			 * or arbitration timeout expired. Take the bus.
 			 */
-			data->state = pca9541_own_bus;
-			write_val = (pca9541_control[reg & 0x0f]
+			data->state = pca9541_take_bus;
+			write_val = (pca9541_control[oreg & 0x0f]
 				     | PCA9541_CTL_NTESTON);
 		} else {
 			/*
@@ -500,6 +504,11 @@ static void pca9541_timeout(unsigned long tdata)
 	int ret;
 
 	BUG_ON(data->state != pca9541_waiting);
+
+	if (!time_is_after_eq_jiffies(data->timeout)) {
+		pca9541_d_complete(data, -ETIMEDOUT);
+		return;
+	}
 
 	ret = pca9541_start_arb(data);
 	if (ret)
