@@ -32,3 +32,18 @@ extern struct rw_semaphore	__i2c_board_lock;
 extern struct list_head	__i2c_board_list;
 extern int		__i2c_first_dynamic_bus_num;
 
+/*
+ * Start the timer for the given entry.  The entry must be on top of
+ * the queue and running.  This is for use by muxes, they run an
+ * operation on top of the queue to start the operation to set the
+ * mux.  But then when the original operation starts up, it will not
+ * have a timer running.  Allow the mux to start the timer.
+ * The mux must to an extra get on the entry, otherwise it may go
+ * away after the start operation.
+ */
+extern void i2c_start_timer(struct i2c_op_q_entry *entry);
+
+/*
+ * Increment the usecount of the entry.
+ */
+extern void i2c_entry_use(struct i2c_op_q_entry *entry);
