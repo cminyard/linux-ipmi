@@ -166,7 +166,7 @@ static int pca9541_d_reg_read(struct pca9541 *data, u8 command)
 
 	data->op_e.smbus.read_write = I2C_SMBUS_READ;
 	data->op_e.smbus.command = command;
-		
+
 	return i2c_non_blocking_op_head(client, &data->op_e);
 }
 
@@ -327,7 +327,7 @@ static int pca9541_release_chan(struct i2c_adapter *adap,
 static int pca9541_start_arb(struct pca9541 *data)
 {
 	data->state = pca9541_read_control;
-	return pca9541_reg_read(data->client, PCA9541_CONTROL);
+	return pca9541_d_reg_read(data, PCA9541_CONTROL);
 }
 
 static int pca9541_d_select_chan(struct i2c_adapter *adap, void *client,
@@ -500,7 +500,7 @@ static void pca9541_op_done(struct i2c_op_q_entry *entry)
 
 static void pca9541_timeout(unsigned long tdata)
 {
-	struct pca9541 *data = (struct pca9541 *) data;
+	struct pca9541 *data = (struct pca9541 *) tdata;
 	int ret;
 
 	BUG_ON(data->state != pca9541_waiting);
