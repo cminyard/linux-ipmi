@@ -25,6 +25,7 @@
 #include <linux/i2c.h>
 #include <linux/i2c-mux.h>
 #include <linux/of.h>
+#include "i2c-core.h"
 
 /* multiplexer per channel data */
 struct i2c_mux_priv {
@@ -124,6 +125,7 @@ static void i2c_mux_op_done(struct i2c_adapter *parent,
 
 	BUG_ON(entry != priv->curr_op);
 	parent->op_done_handler = NULL;
+	entry->adap = &priv->adap;
 	i2c_mux_start_deselect(priv, entry);
 }
 
@@ -140,12 +142,14 @@ static int i2c_mux_do_start(struct i2c_mux_priv *priv)
 		 */
 		parent->op_done_handler = i2c_mux_op_done;
 		parent->op_done_data = priv;
+		entry->adap = parent;
 	} else {
 		/*
-		 * We are done, just run th eop.
+		 * We are done, just run the op.
 		 */
 		priv->curr_op = NULL;
 	}
+	i2c_entry_use(entry);
 	if (priv->use_smbus)
 		ret = parent->algo->smbus_start(parent, entry);
 	else
@@ -154,7 +158,11 @@ static int i2c_mux_do_start(struct i2c_mux_priv *priv)
 	if (ret) {
 		entry->result = ret;
 		parent->op_done_handler = NULL;
+		entry->adap = &priv->adap;
+	} else {
+		i2c_start_timer(entry);
 	}
+	i2c_entry_put(entry);
 	return ret;
 }
 
@@ -182,6 +190,7 @@ static int i2c_mux_start(struct i2c_mux_priv *priv,
 	struct i2c_adapter *parent = priv->parent;
 	int ret;
 
+	BUG_ON(priv->curr_op != NULL);
 	priv->curr_op = entry;
 
 	/* Select the right mux port and perform the transfer. */
@@ -195,7 +204,7 @@ static int i2c_mux_start(struct i2c_mux_priv *priv,
 		 * let the delayed handling do this.
 		 */
 		if (ret <= 0)
-			return ret;
+			goto out;
 	} else {
 		ret = priv->select(parent, priv->mux_priv, priv->chan_id);
 	}
@@ -220,6 +229,9 @@ static int i2c_mux_start(struct i2c_mux_priv *priv,
 					priv->chan_id);
 		}
 	}
+out:
+	if (ret < 0)
+		priv->curr_op = NULL;
 	return ret;
 }
 
@@ -242,13 +254,16 @@ static int i2c_mux_smbus_start(struct i2c_adapter *adap,
 }
 
 /*
- * Just a dummy routine, but it needs to be here because i2c-core
- * calls it if we have non-blocking capability.
+ * Call the sub-poll routine.
  */
 static void i2c_mux_poll(struct i2c_adapter *adap,
-			 struct i2c_op_q_entry *e,
+			 struct i2c_op_q_entry *entry,
 			 unsigned int ns_since_last_poll)
 {
+	struct i2c_mux_priv *priv = adap->algo_data;
+	struct i2c_adapter *parent = priv->parent;
+
+	parent->algo->poll(parent, entry, ns_since_last_poll);
 }
 
 /* Return the parent's functionality */
