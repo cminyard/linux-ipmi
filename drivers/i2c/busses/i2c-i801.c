@@ -205,7 +205,7 @@ struct i801_priv {
 	unsigned int features;
 
 	/* isr/timer processing */
-	u8 status;
+	int status;
 	u8 xact_extra; /* Used to set INTREN if irqs enabled, and HWPEC */
 	int done;
 	spinlock_t lock;
@@ -215,6 +215,7 @@ struct i801_priv {
 	u8 xact;
 	bool is_read;
 	int byte_by_byte;
+	struct tasklet_struct byte_tasklet;
 	int block;
 	int count;
 	int hostc;
@@ -286,6 +287,9 @@ static int i801_terminate_transaction(struct i801_priv *priv)
 	int status, ret = 0, i;
 
 	dev_dbg(&priv->pci_dev->dev, "Terminating the current operation\n");
+
+	/* Make sure interrupts are off. */
+	outb_p(inb_p(SMBHSTCNT(priv)) | ~SMBHSTCNT_INTREN, SMBHSTCNT(priv));
 
 	/* Flush the input buffer */
 	for (i = 0; i < 32; i++)
@@ -433,6 +437,16 @@ static void i801_block_transaction_by_block(struct i801_priv *priv)
 	i801_transaction(priv, I801_BLOCK_DATA);
 }
 
+static void i801_next_byte_tasklet(unsigned long tdata)
+{
+	struct i801_priv *priv = (struct i801_priv *) tdata;
+
+	/* Clear BYTE_DONE to continue with next byte */
+	outb_p(SMBHSTSTS_BYTE_DONE, SMBHSTSTS(priv));
+	if (priv->features & FEATURE_IRQ)
+		enable_irq(priv->pci_dev->irq);
+}
+
 static void i801_byte_done(struct i801_priv *priv)
 {
 	u8 *data = &priv->data->block[1];
@@ -471,15 +485,16 @@ static void i801_byte_done(struct i801_priv *priv)
 		/* Write next byte, except for IRQ after last byte */
 		outb_p(data[++priv->count], SMBBLKDAT(priv));
 	}
-
-	/* Clear BYTE_DONE to continue with next byte */
-	outb_p(SMBHSTSTS_BYTE_DONE, SMBHSTSTS(priv));
 }
 
 static int i801_check(struct i801_priv *priv, u8 status)
 {
-	if (status & SMBHSTSTS_BYTE_DONE)
+	bool finish_byte = false;
+
+	if (status & SMBHSTSTS_BYTE_DONE) {
 		i801_byte_done(priv);
+		finish_byte = true;
+	}
 
 	/*
 	 * Clear irq sources and report transaction result.
@@ -488,12 +503,22 @@ static int i801_check(struct i801_priv *priv, u8 status)
 	status &= SMBHSTSTS_INTR | STATUS_ERROR_FLAGS;
 	if (status) {
 		struct i2c_op_q_entry *e = i2c_entry_get(&priv->adapter);
+
+		if (finish_byte)
+			outb_p(SMBHSTSTS_BYTE_DONE, SMBHSTSTS(priv));
 		outb_p(status, SMBHSTSTS(priv));
 		priv->status |= status;
-		i801_op_done(priv, e);
-		i2c_entry_put(e);
+		if (e) {
+			i801_op_done(priv, e);
+			i2c_entry_put(e);
+		}
 		return 1;
+	} else if (finish_byte) {
+		if (priv->features & FEATURE_IRQ)
+			disable_irq_nosync(priv->pci_dev->irq);
+		tasklet_schedule(&priv->byte_tasklet);
 	}
+
 	return 0;
 }
 
@@ -516,6 +541,7 @@ static irqreturn_t i801_isr(int irq, void *dev_id)
 	struct i801_priv *priv = dev_id;
 	u16 pcists;
 	u8 status;
+	unsigned long flags;
 
 	/* Confirm this is our interrupt */
 	pci_read_config_word(priv->pci_dev, SMBPCISTS, &pcists);
@@ -526,9 +552,9 @@ static irqreturn_t i801_isr(int irq, void *dev_id)
 	if (status != 0x42)
 		dev_dbg(&priv->pci_dev->dev, "irq: status = %02x\n", status);
 
-	spin_lock(&priv->lock);
+	spin_lock_irqsave(&priv->lock, flags);
 	i801_check(priv, status);
-	spin_unlock(&priv->lock);
+	spin_unlock_irqrestore(&priv->lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -1116,6 +1142,8 @@ static int i801_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	priv->adapter.owner = THIS_MODULE;
 	priv->adapter.class = i801_get_adapter_class(priv);
 	priv->adapter.algo = &smbus_algorithm;
+	tasklet_init(&priv->byte_tasklet, i801_next_byte_tasklet,
+		     (unsigned long) priv);
 
 	priv->pci_dev = dev;
 	switch (dev->device) {
