@@ -34,6 +34,7 @@
 #include <linux/swab.h>		/* for swab16 */
 #include <uapi/linux/i2c.h>
 #include <linux/hrtimer.h>
+#include <linux/interrupt.h>
 
 extern struct bus_type i2c_bus_type;
 extern struct device_type i2c_adapter_type;
@@ -139,8 +140,10 @@ extern s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client,
 extern int i2c_non_blocking_op(struct i2c_client *client,
 			       struct i2c_op_q_entry *entry);
 
-/* Like above, but queue it to the head.  This is for mux use
-   only, as it will mess up any ongoing operations otherwise. */
+/*
+ * Like above, but queue it to the head.  This is for mux use only, as
+ * it will mess up any ongoing operations otherwise.
+ */
 extern int i2c_non_blocking_op_head(struct i2c_client *client,
 				    struct i2c_op_q_entry *entry);
 
@@ -540,6 +543,8 @@ struct i2c_adapter {
 	spinlock_t real_q_lock;
 	struct hrtimer real_timer;
 
+	struct tasklet_struct tasklet;
+
 	/* Special handling for operation done, for muxes. */
 	void (*op_done_handler)(struct i2c_adapter *, struct i2c_op_q_entry *);
 	void *op_done_data;
@@ -767,17 +772,18 @@ struct i2c_op_q_entry {
 	/**************************************************************/
 	/* Bus Interface */
 	/*
-	 * The bus interface must set call_again_ns to the time in
-	 * nanoseconds until the next poll operation should be
-	 * called.  This *must* be set in the start operation
-	 * function.  The value may be changed in poll calls if the
-	 * bus interface needs different timeouts at different times.
-	 * The time_left and data can be used for anything the bus
-	 * interface likes.  data will be set to NULL before being
-	 * started; the bus interface must use that to tell if the
-	 * entry has been set up.  It should ignore poll operations on
-	 * entries that are not yet set up.
+	 * The bus interface must set use_timer and call_again_ns to
+	 * the time in nanoseconds until the next poll operation
+	 * should be called if it wants to be polled.  This *must* be
+	 * set in the start operation function.  The value may be
+	 * changed in poll calls if the bus interface needs different
+	 * timeouts at different times.  The time_left and data can be
+	 * used for anything the bus interface likes.  data will be
+	 * set to NULL before being started; the bus interface must
+	 * use that to tell if the entry has been set up.  It should
+	 * ignore poll operations on entries that are not yet set up.
 	 */
+	bool          use_timer;
 	unsigned long call_again_ns;
 	long          time_left;
 	void	      *data;
@@ -788,7 +794,6 @@ struct i2c_op_q_entry {
 	struct completion done;
 	unsigned long     end_jiffies;
 	unsigned int      tries;
-	unsigned char     use_timer;
 
 #define I2C_OP_QUEUED		0
 #define I2C_OP_RUNNING		1

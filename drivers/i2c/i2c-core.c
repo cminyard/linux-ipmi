@@ -69,7 +69,9 @@ static struct device_type i2c_client_type;
 static int i2c_detect(struct i2c_adapter *adapter, struct i2c_driver *driver);
 static enum hrtimer_restart i2c_handle_timer(struct hrtimer *hrtimer);
 static int i2c_start_next_entry(struct i2c_adapter *adap,
-				struct i2c_op_q_entry *myentry);
+				struct i2c_op_q_entry *myentry,
+				bool add_head);
+static void i2c_op_done_tasklet(unsigned long tdata);
 
 static struct static_key i2c_trace_msg = STATIC_KEY_INIT_FALSE;
 
@@ -1266,6 +1268,7 @@ static int i2c_register_adapter(struct i2c_adapter *adap)
 		adap->real_timer.function = i2c_handle_timer;
 		adap->timer = &adap->real_timer; 
 	}
+	tasklet_init(&adap->tasklet, i2c_op_done_tasklet, (unsigned long) adap);
 	adap->op_done_handler = NULL;
 
 	/* Set default timeout to 1 second if not already set */
@@ -1533,6 +1536,7 @@ void i2c_del_adapter(struct i2c_adapter *adap)
 	dev_dbg(&adap->dev, "adapter [%s] unregistered\n", adap->name);
 
 	hrtimer_cancel(adap->timer);
+	tasklet_kill(&adap->tasklet);
 
 	/* clean up the sysfs representation */
 	init_completion(&adap->dev_released);
@@ -1748,35 +1752,36 @@ module_exit(i2c_exit);
  * Timer operations
  * ----------------------------------------------------
  */
-static void i2c_start_timer(struct i2c_op_q_entry *entry)
+void i2c_start_timer(struct i2c_op_q_entry *entry)
 {
-	hrtimer_start(entry->adap->timer,
-		      ktime_add_ns(ktime_get(), entry->call_again_ns),
-		      HRTIMER_MODE_ABS);
+	struct i2c_adapter *adap = entry->adap;
+	unsigned long flags;
+
+	spin_lock_irqsave(adap->q_lock, flags);
+	if (entry->use_timer && entry->state == I2C_OP_RUNNING)
+		hrtimer_start(entry->adap->timer,
+			      ktime_add_ns(ktime_get(), entry->call_again_ns),
+			      HRTIMER_MODE_ABS);
+	spin_unlock_irqrestore(adap->q_lock, flags);
 }
+EXPORT_SYMBOL(i2c_start_timer);
 
 static enum hrtimer_restart i2c_handle_timer(struct hrtimer *hrtimer)
 {
 	struct i2c_adapter *adap = container_of(hrtimer, struct i2c_adapter,
 						real_timer);
 	struct i2c_op_q_entry *entry;
-	enum hrtimer_restart ret = HRTIMER_NORESTART;
 
 	entry = i2c_entry_get(adap);
 	pr_debug("i2c_handle_timer: %p %p\n", adap, entry);
 	if (entry) {
 		adap = entry->adap;
 		adap->algo->poll(adap, entry, entry->call_again_ns);
-
-		if (entry->use_timer && (entry->state != I2C_OP_FINISHED)) {
-			hrtimer_forward_now(adap->timer,
-					    ns_to_ktime(entry->call_again_ns));
-			ret = HRTIMER_RESTART;
-		}
+		i2c_start_timer(entry);
 		i2c_entry_put(entry);
 	}
 
-	return ret;
+	return HRTIMER_NORESTART;
 }
 
 /* ----------------------------------------------------
@@ -1847,6 +1852,8 @@ static void i2c_init_entry(struct i2c_adapter *adap,
 	entry->end_jiffies = jiffies + adap->timeout;
 	entry->tries = 0;
 	kref_init(&entry->usecount);
+	entry->use_timer = false;
+	entry->call_again_ns = 0;
 }
 
 static void i2c_wait_done(struct i2c_op_q_entry *entry)
@@ -1858,16 +1865,12 @@ static void i2c_wait_done(struct i2c_op_q_entry *entry)
 static void i2c_perform_op_wait(struct i2c_adapter *adap,
 				struct i2c_op_q_entry *entry)
 {
-	unsigned long flags;
 	int ret = 0;
 
 	pr_debug("i2c_perform_op_wait %p %p\n", adap, entry);
 	entry->handler = i2c_wait_done;
 
-	spin_lock_irqsave(adap->q_lock, flags);
-	list_add_tail(&entry->link, adap->q);
-	spin_unlock_irqrestore(adap->q_lock, flags);
-	ret = i2c_start_next_entry(adap, entry);
+	ret = i2c_start_next_entry(adap, entry, false);
 	if (!ret)
 		wait_for_completion(&entry->done);
 }
@@ -2892,34 +2895,11 @@ struct i2c_op_q_entry *i2c_entry_get(struct i2c_adapter *adap)
 }
 EXPORT_SYMBOL(i2c_entry_get);
 
-/*
- * Start the next entry in the queue.  If an entry that is processed
- * matches myentry and an error occurs starting it, don't do the
- * completion, return the error value instead.
- */
-static int i2c_start_next_entry(struct i2c_adapter *adap,
-				struct i2c_op_q_entry *myentry)
+static int i2c_start_entry(struct i2c_adapter *adap,
+			   struct i2c_op_q_entry *entry)
 {
-	unsigned long flags;
-	struct i2c_op_q_entry *entry;
-	int ret = 0, result;
+	int result;
 
-next_entry:
-	/* Start the next entry, if there is one and it's not running. */
-	spin_lock_irqsave(adap->q_lock, flags);
-	entry = _i2c_entry_get(adap);
-	if (entry) {
-		if (entry->state != I2C_OP_QUEUED)
-			entry = NULL;
-		else
-			entry->state = I2C_OP_RUNNING;
-	}
-	spin_unlock_irqrestore(adap->q_lock, flags);
-
-	if (!entry)
-		return ret;
-
-	adap = entry->adap;
 	/*
 	 * Note: Do not assign to entry->result here.  The operations
 	 * may complete before the function returns (like on qemu with
@@ -2936,34 +2916,84 @@ next_entry:
 		result = -EINVAL;
 	}
 
-	if (result) {
+	if (result)
 		entry->result = result;
-		spin_lock_irqsave(adap->q_lock, flags);
-		entry->state = I2C_OP_FINISHED;
-		list_del(&entry->link);
-		spin_unlock_irqrestore(adap->q_lock, flags);
 
-		if (entry != myentry) {
-			ret = entry->result;
+	return result;
+}
+
+static int _i2c_start_next_entry(struct i2c_adapter *adap,
+				 struct i2c_op_q_entry *myentry,
+				 unsigned long *flags)
+{
+	struct i2c_op_q_entry *entry;
+	int ret = 0, result;
+
+next_entry:
+	/* Start the next entry, if there is one and it's not running. */
+	entry = _i2c_entry_get(adap);
+	if (entry) {
+		if (entry->state != I2C_OP_QUEUED) {
+			entry = NULL;
 		} else {
-			if (entry->complete)
-				entry->complete(adap, entry);
-
-			i2c_entry_put(entry);
+			i2c_entry_use(entry);
+			entry->state = I2C_OP_RUNNING;
 		}
-
-		goto next_entry;
 	}
-	
-	if (entry->use_timer)
+	spin_unlock_irqrestore(adap->q_lock, *flags);
+
+	if (!entry)
+		return ret;
+
+	adap = entry->adap;
+	result = i2c_start_entry(adap, entry);
+	if (result) {
+		/* Undo the use we did above. */
+		i2c_entry_put(entry);
+
+		if (entry == myentry) {
+			ret = result;
+			spin_lock_irqsave(adap->q_lock, *flags);
+			goto next_entry;
+		} else {
+			/* No need for a lock, nothing can be running. */
+			entry->state = I2C_OP_FINISHED;
+			tasklet_schedule(&adap->tasklet);
+		}
+	} else {
 		i2c_start_timer(entry);
+		i2c_entry_put(entry);
+	}
+
 	return ret;
+}
+
+/*
+ * Start the next entry in the queue, adding myentry if it is not
+ * NULL.  If an entry that is processed matches myentry and an error
+ * occurs starting it, don't do the completion, return the error value
+ * instead.
+ */
+static int i2c_start_next_entry(struct i2c_adapter *adap,
+				struct i2c_op_q_entry *myentry,
+				bool queue_head)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(adap->q_lock, flags);
+	if (queue_head)
+		list_add(&myentry->link, adap->q);
+	else
+		list_add_tail(&myentry->link, adap->q);
+
+	return _i2c_start_next_entry(adap, myentry, &flags);
 }
 
 static void i2c_op_release(struct kref *ref)
 {
-	struct i2c_op_q_entry *entry = container_of(ref, struct i2c_op_q_entry,
-						    usecount);
+	struct i2c_op_q_entry *entry;
+	entry = container_of(ref, struct i2c_op_q_entry,
+			     usecount);
 	if (entry->handler)
 		entry->handler(entry);
 }
@@ -2975,19 +3005,98 @@ void i2c_entry_put(struct i2c_op_q_entry *entry)
 }
 EXPORT_SYMBOL(i2c_entry_put);
 
+void i2c_entry_use(struct i2c_op_q_entry *entry)
+{
+	pr_debug("i2c_use %p %p\n", entry->adap, entry);
+	kref_get(&entry->usecount);
+}
+EXPORT_SYMBOL(i2c_entry_use);
+
+static void i2c_finish_list(struct list_head *finished_list)
+{
+	struct i2c_op_q_entry *entry;
+
+	while (!list_empty(finished_list)) {
+		entry = list_entry(finished_list->next, struct i2c_op_q_entry,
+				   link);
+		list_del(&entry->link);
+
+		if (entry->complete)
+			entry->complete(entry->adap, entry);
+
+		/* Finish the operation. */
+		i2c_entry_put(entry);
+	}
+}
+
+static void i2c_op_done_tasklet(unsigned long tdata)
+{
+	struct i2c_adapter *adap = (struct i2c_adapter *) tdata;
+	struct i2c_op_q_entry *entry;
+	unsigned long flags;
+	LIST_HEAD(finished_list);
+
+	spin_lock_irqsave(adap->q_lock, flags);
+restart:
+	entry = _i2c_entry_get(adap);
+	if (entry) {
+		if (entry->state != I2C_OP_FINISHED)
+			entry = NULL;
+	}
+
+	if (!entry)
+		goto out_start_next;
+
+	hrtimer_cancel(adap->timer);
+
+	if (entry->result == -EAGAIN) {
+		/* Retry on arbitration loss, unless we timed out. */
+		entry->tries++;
+		if ((entry->tries <= adap->retries) ||
+				!time_after(jiffies, entry->end_jiffies)) {
+			/* Restart the operation. */
+			entry->result = 0;
+			entry->state = I2C_OP_RUNNING;
+			i2c_entry_use(entry);
+			spin_unlock_irqrestore(adap->q_lock, flags);
+
+			if (!i2c_start_entry(adap, entry)) {
+				i2c_start_timer(entry);
+				i2c_entry_put(entry);
+				/* Don't put again, we aren't done. */
+				goto out_finish;
+			}
+			i2c_entry_put(entry);
+			spin_lock_irqsave(adap->q_lock, flags);
+		}
+	}
+
+	if (adap->op_done_handler) {
+		/*
+		 * Mux handlers intercept this and re-call when they
+		 * are finished with their mux handling.
+		 */
+		entry->state = I2C_OP_RUNNING;
+		spin_unlock_irqrestore(adap->q_lock, flags);
+		adap->op_done_handler(adap, entry);
+		goto out_finish;
+	}
+
+	list_del(&entry->link);
+	list_add_tail(&entry->link, &finished_list);
+
+	goto restart;
+
+out_start_next:
+	_i2c_start_next_entry(adap, NULL, &flags);
+out_finish:
+	i2c_finish_list(&finished_list);
+}
+
 void i2c_op_done(struct i2c_op_q_entry *entry)
 {
 	struct i2c_adapter *adap = entry->adap;
 	unsigned long flags;
-
-	if (adap->op_done_handler) {
-		/*
-		 * Mux handlers intercept this an re-call when they
-		 * are finished with their mux handling.
-		 */
-		adap->op_done_handler(adap, entry);
-		return;
-	}
 
 	pr_debug("i2c_op_done: %p %p\n", adap, entry);
 	spin_lock_irqsave(adap->q_lock, flags);
@@ -2999,32 +3108,14 @@ void i2c_op_done(struct i2c_op_q_entry *entry)
 	 */
 	if (entry->state == I2C_OP_FINISHED) {
 		spin_unlock_irqrestore(adap->q_lock, flags);
-		goto out_put;
-	}
-
-	if (entry->result == -EAGAIN) {
-		/* Retry on arbitration loss, unless we timed out. */
-		entry->tries++;
-		if ((entry->tries <= adap->retries) ||
-				!time_after(jiffies, entry->end_jiffies)) {
-			entry->result = 0;
-			spin_unlock_irqrestore(adap->q_lock, flags);
-			goto out_put;
-		}
+		i2c_entry_put(entry);
+		return;
 	}
 
 	entry->state = I2C_OP_FINISHED;
-	list_del(&entry->link);
+	tasklet_schedule(&adap->tasklet);
 
 	spin_unlock_irqrestore(adap->q_lock, flags);
-
-	if (entry->complete)
-		entry->complete(adap, entry);
-
-	i2c_start_next_entry(adap, NULL);
-
-out_put:
-	i2c_entry_put(entry);
 }
 EXPORT_SYMBOL(i2c_op_done);
 
@@ -3035,11 +3126,12 @@ void i2c_poll(struct i2c_client *client,
 	struct i2c_op_q_entry *entry;
 
 	entry = i2c_entry_get(adap);
-	if (!entry)
-		return;
-	adap = entry->adap;
-	adap->algo->poll(entry->adap, entry, ns_since_last_call);
-	i2c_entry_put(entry);
+	if (entry) {
+		adap = entry->adap;
+		adap->algo->poll(entry->adap, entry, ns_since_last_call);
+		i2c_entry_put(entry);
+	}
+	i2c_op_done_tasklet((unsigned long) adap);
 }
 EXPORT_SYMBOL(i2c_poll);
 
@@ -3047,7 +3139,6 @@ static int _i2c_non_blocking_op(struct i2c_client *client,
 				struct i2c_op_q_entry *entry,
 				bool queue_head)
 {
-	unsigned long      flags;
 	struct i2c_adapter *adap = client->adapter;
 
 	if (!i2c_non_blocking_capable(adap))
@@ -3065,14 +3156,7 @@ static int _i2c_non_blocking_op(struct i2c_client *client,
 
 	i2c_init_entry(adap, entry);
 
-	spin_lock_irqsave(adap->q_lock, flags);
-	if (queue_head)
-		list_add(&entry->link, adap->q);
-	else
-		list_add_tail(&entry->link, adap->q);
-	spin_unlock_irqrestore(adap->q_lock, flags);
-
-	return i2c_start_next_entry(adap, entry);
+	return i2c_start_next_entry(adap, entry, queue_head);
 }
 
 int i2c_non_blocking_op(struct i2c_client *client,
