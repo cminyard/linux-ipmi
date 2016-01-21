@@ -1645,7 +1645,7 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 
 	if (retval) {
 		spin_lock_irq(&uport->lock);
-		uport->flags &= UPF_INUSE_NORMAL;
+		uport->flags &= ~UPF_INUSE_NORMAL;
 		spin_unlock_irq(&uport->lock);
 	}
 
