@@ -49,6 +49,7 @@
 #include <linux/pm_domain.h>
 #include <linux/acpi.h>
 #include <linux/jump_label.h>
+#include <linux/ctype.h>
 #include <asm/uaccess.h>
 #include <linux/err.h>
 
