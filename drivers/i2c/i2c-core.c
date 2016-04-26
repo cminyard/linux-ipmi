@@ -861,7 +861,7 @@ i2c_sysfs_new_device(struct device *dev, struct device_attribute *attr,
 
 	/* Parse address, saving remaining parameters. */
 	res = sscanf(pos, "%hi%c", &info.addr, &end);
-	if (res < 1 || !isspace(end)) {
+	if (res < 1 || (res > 1 && !isspace(end))) {
 		dev_err(dev, "%s: Can't parse I2C address\n", "new_device");
 		return -EINVAL;
 	}
