@@ -3986,7 +3986,8 @@ smi_from_recv_msg(ipmi_smi_t intf, struct ipmi_recv_msg *recv_msg,
 }
 
 static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
-			      struct list_head *timeouts, long timeout_period,
+			      struct list_head *timeouts,
+			      unsigned long timeout_period,
 			      int slot, unsigned long *flags)
 {
 	struct ipmi_recv_msg     *msg;
@@ -3998,9 +3999,10 @@ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
 	if (!ent->inuse)
 		return;
 
-	ent->timeout -= timeout_period;
-	if (ent->timeout > 0)
+	if (timeout_period < ent->timeout) {
+		ent->timeout -= timeout_period;
 		return;
+        }
 
 	if (ent->retries_left == 0) {
 		/* The message has used all its retries. */
@@ -4062,7 +4064,12 @@ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
 	}
 }
 
+<<<<<<< HEAD
 static void ipmi_timeout_handler(long timeout_period)
+=======
+static unsigned int ipmi_timeout_handler(ipmi_smi_t intf,
+					 unsigned long timeout_period)
+>>>>>>> 63a016d... ipmi: fix unsigned long underflow
 {
 	ipmi_smi_t           intf;
 	struct list_head     timeouts;
