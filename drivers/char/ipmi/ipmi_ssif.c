@@ -60,6 +60,11 @@
 
 #define IPMI_GET_SYSTEM_INTERFACE_CAPABILITIES_CMD	0x57
 
+static u8 openbmc_iana[3] = { 0x10, 0x20, 0x30 };
+#define IPMI_OPENBMC_CAPABILITY_REQUEST_CMD	0x01
+#define SSIF_OPENBMC_REQUEST	0x80
+#define SSIF_OPENBMC_RESPONSE	0x81
+
 #define	SSIF_IPMI_REQUEST			2
 #define	SSIF_IPMI_MULTI_PART_REQUEST_START	6
 #define	SSIF_IPMI_MULTI_PART_REQUEST_MIDDLE	7
@@ -222,6 +227,12 @@ struct ssif_info {
 	u8		    global_enables;
 	bool		    has_event_buffer;
 	bool		    supports_alert;
+
+	/*
+	 * OpenBMC mode, with large message and sequence number
+	 * support.  An int because we use it as a number, too.
+	 */
+	unsigned int	    is_openbmc;
 
 	/*
 	 * Used to tell what we should do with alerts.  If we are
@@ -537,12 +548,13 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 static void start_get(struct ssif_info *ssif_info)
 {
 	int rv;
+	int command = ssif_info->is_openbmc ? SSIF_OPENBMC_RESPONSE :
+			SSIF_IPMI_RESPONSE;
 
 	ssif_info->rtc_us_timer = 0;
 	ssif_info->multi_pos = 0;
 
-	rv = ssif_i2c_send(ssif_info, msg_done_handler, I2C_SMBUS_READ,
-			  SSIF_IPMI_RESPONSE,
+	rv = ssif_i2c_send(ssif_info, msg_done_handler, I2C_SMBUS_READ, command,
 			  ssif_info->recv, I2C_SMBUS_BLOCK_DATA);
 	if (rv < 0) {
 		/* request failed, just return the error. */
@@ -611,7 +623,12 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 	 * start messing with driver states or the queues.
 	 */
 
-	if (result < 0) {
+	/*
+	 * Some BMCs cannot NACK a message, instead they return a too
+	 * short message if the response isn't available.
+	 */
+	if (result < 0 || len < 3) {
+	ignore_msg:
 		ssif_info->retries_left--;
 		if (ssif_info->retries_left > 0) {
 			ssif_inc_stat(ssif_info, receive_retries);
@@ -633,7 +650,13 @@ static void msg_done_handler(struct ssif_info *ssif_info, int result,
 		goto continue_op;
 	}
 
-	if ((len > 1) && (ssif_info->multi_pos == 0)
+	if (ssif_info->is_openbmc) {
+		if (len < 4)
+			goto ignore_msg;
+		/* Eventually extract sequence number from data[0]. */
+		data++;
+		len--;
+	} else if ((len > 1) && (ssif_info->multi_pos == 0)
 				&& (data[0] == 0x00) && (data[1] == 0x01)) {
 		/* Start of multi-part read.  Start the next transaction. */
 		int i;
@@ -966,7 +989,11 @@ static int start_resend(struct ssif_info *ssif_info)
 
 	ssif_info->got_alert = false;
 
-	if (ssif_info->data_len > 32) {
+	if (ssif_info->is_openbmc) {
+		ssif_info->multi_data = NULL;
+		command = SSIF_OPENBMC_REQUEST;
+		ssif_info->data[0] = ssif_info->data_len;
+	} else if (ssif_info->data_len > 32) {
 		command = SSIF_IPMI_MULTI_PART_REQUEST_START;
 		ssif_info->multi_data = ssif_info->data;
 		ssif_info->multi_len = ssif_info->data_len;
@@ -1000,7 +1027,11 @@ static int start_send(struct ssif_info *ssif_info,
 		return -E2BIG;
 
 	ssif_info->retries_left = SSIF_SEND_RETRIES;
-	memcpy(ssif_info->data + 1, data, len);
+	memcpy(ssif_info->data + 1 + ssif_info->is_openbmc, data, len);
+	if (ssif_info->is_openbmc) {
+		ssif_info->data[1] = 0; /* Sequence number eventually. */
+		len++;
+	}
 	ssif_info->data_len = len;
 	return start_resend(ssif_info);
 }
@@ -1441,7 +1472,7 @@ static int find_slave_address(struct i2c_client *client, int slave_addr)
 
 static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
-	unsigned char     msg[3];
+	unsigned char     msg[6];
 	unsigned char     *resp;
 	struct ssif_info   *ssif_info;
 	int               rv = 0;
@@ -1569,6 +1600,24 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		ssif_info->max_recv_msg_size = 32;
 		ssif_info->multi_support = SSIF_NO_MULTI;
 		ssif_info->supports_pec = 0;
+	}
+
+	msg[0] = IPMI_NETFN_OEM_GROUP_REQUEST << 2;
+	msg[1] = IPMI_OPENBMC_CAPABILITY_REQUEST_CMD;
+	memcpy(msg, openbmc_iana, sizeof(openbmc_iana));
+	rv = do_cmd(client, 5, msg, &len, resp);
+	if (!rv && (len >= 3) && (resp[2] == 0)) {
+		/* It appears we have an OpenBMC device. */
+
+		/* Turn of multi support. */
+		ssif_info->multi_support = SSIF_NO_MULTI;
+		ssif_info->max_xmit_msg_size = 32;
+		ssif_info->max_recv_msg_size = 32;
+		if (len > 3)
+			ssif_info->max_xmit_msg_size = resp[3];
+		if (len > 4)
+			ssif_info->max_recv_msg_size = resp[4];
+		ssif_info->is_openbmc = 1;
 	}
 
 	/* Make sure the NMI timeout is cleared. */
