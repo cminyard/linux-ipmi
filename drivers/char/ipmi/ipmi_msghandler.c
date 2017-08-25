@@ -265,6 +265,7 @@ struct ipmi_proc_entry {
 struct bmc_device {
 	struct platform_device pdev;
 	struct ipmi_device_id  id;
+	struct list_head       intfs;
 	unsigned char          guid[16];
 	int                    guid_set;
 	char                   name[16];
@@ -403,6 +404,7 @@ struct ipmi_smi {
 	wait_queue_head_t waitq;
 
 	struct bmc_device *bmc;
+	struct list_head bmc_link;
 	char *my_dev_name;
 
 	/*
@@ -2611,9 +2613,10 @@ static void ipmi_bmc_unregister(ipmi_smi_t intf)
 	}
 
 	mutex_lock(&ipmidriver_mutex);
+	list_del(&intf->bmc_link);
+	intf->bmc = NULL;
 	kref_put(&bmc->usecount, cleanup_bmc_device);
 	mutex_unlock(&ipmidriver_mutex);
-	intf->bmc = NULL;
 }
 
 static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
@@ -2641,7 +2644,10 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 	 */
 	if (old_bmc) {
 		kfree(bmc);
+		mutex_lock(&ipmidriver_mutex);
 		intf->bmc = old_bmc;
+		list_add_tail(&intf->bmc_link, &bmc->intfs);
+		mutex_unlock(&ipmidriver_mutex);
 		bmc = old_bmc;
 
 		printk(KERN_INFO
@@ -2690,6 +2696,7 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 		kref_init(&bmc->usecount);
 
 		rv = platform_device_register(&bmc->pdev);
+		list_add_tail(&intf->bmc_link, &bmc->intfs);
 		mutex_unlock(&ipmidriver_mutex);
 		if (rv) {
 			put_device(&bmc->pdev.dev);
@@ -2967,6 +2974,7 @@ int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 		kfree(intf);
 		return -ENOMEM;
 	}
+	INIT_LIST_HEAD(&intf->bmc->intfs);
 	intf->intf_num = -1; /* Mark it invalid for now. */
 	kref_init(&intf->refcount);
 	intf->bmc->id = *device_id;
