@@ -412,6 +412,7 @@ struct ipmi_smi {
 	/* Used for wake ups at startup. */
 	wait_queue_head_t waitq;
 
+	struct bmc_device tmp_bmc;
 	struct bmc_device *bmc;
 	struct mutex bmc_reg_mutex;
 	bool bmc_registered;
@@ -2827,7 +2828,7 @@ static void ipmi_bmc_unregister(ipmi_smi_t intf)
 	mutex_lock(&bmc->dyn_mutex);
 	list_del(&intf->bmc_link);
 	mutex_unlock(&bmc->dyn_mutex);
-	intf->bmc = NULL;
+	intf->bmc = &intf->tmp_bmc;
 	mutex_lock(&ipmidriver_mutex);
 	kref_put(&bmc->usecount, cleanup_bmc_device);
 	mutex_unlock(&ipmidriver_mutex);
@@ -2866,7 +2867,6 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 	 * otherwise register the new BMC device
 	 */
 	if (old_bmc) {
-		kfree(bmc);
 		intf->bmc = old_bmc;
 		mutex_lock(&bmc->dyn_mutex);
 		list_add_tail(&intf->bmc_link, &bmc->intfs);
@@ -2883,6 +2883,14 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 		unsigned char orig_dev_id = bmc->id.device_id;
 		int warn_printed = 0;
 		struct bmc_device *tmp_bmc;
+
+		bmc = kzalloc(sizeof(*bmc), GFP_KERNEL);
+		if (!bmc) {
+			rv = -ENOMEM;
+			goto out;
+		}
+		INIT_LIST_HEAD(&bmc->intfs);
+		mutex_init(&bmc->dyn_mutex);
 
 		snprintf(bmc->name, sizeof(bmc->name),
 			 "ipmi_bmc.%4.4x", bmc->id.product_id);
@@ -2908,6 +2916,7 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 			if (bmc->id.device_id == orig_dev_id) {
 				printk(KERN_ERR PFX
 				       "Out of device ids!\n");
+				kfree(bmc);
 				mutex_unlock(&ipmidriver_mutex);
 				rv = -EAGAIN;
 				goto out;
@@ -2999,7 +3008,7 @@ out_put_bmc:
 	mutex_lock(&bmc->dyn_mutex);
 	list_del(&intf->bmc_link);
 	mutex_unlock(&bmc->dyn_mutex);
-	intf->bmc = NULL;
+	intf->bmc = &intf->tmp_bmc;
 	mutex_lock(&ipmidriver_mutex);
 	kref_put(&bmc->usecount, cleanup_bmc_device);
 	mutex_unlock(&ipmidriver_mutex);
@@ -3009,7 +3018,7 @@ out_list_del:
 	mutex_lock(&bmc->dyn_mutex);
 	list_del(&intf->bmc_link);
 	mutex_unlock(&bmc->dyn_mutex);
-	intf->bmc = NULL;
+	intf->bmc = &intf->tmp_bmc;
 	put_device(&bmc->pdev.dev);
 	goto out;
 }
@@ -3235,11 +3244,7 @@ int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 	if (!intf)
 		return -ENOMEM;
 
-	intf->bmc = kzalloc(sizeof(*intf->bmc), GFP_KERNEL);
-	if (!intf->bmc) {
-		kfree(intf);
-		return -ENOMEM;
-	}
+	intf->bmc = &intf->tmp_bmc;
 	INIT_LIST_HEAD(&intf->bmc->intfs);
 	mutex_init(&intf->bmc->dyn_mutex);
 	INIT_LIST_HEAD(&intf->bmc_link);
