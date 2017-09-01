@@ -266,7 +266,7 @@ struct bmc_device {
 	struct platform_device pdev;
 	struct ipmi_device_id  id;
 	struct list_head       intfs;
-	unsigned char          guid[16];
+	u8                     guid[16];
 	int                    guid_set;
 	char                   name[16];
 	struct kref	       usecount;
@@ -274,7 +274,8 @@ struct bmc_device {
 #define to_bmc_device(x) container_of((x), struct bmc_device, pdev.dev)
 
 static int bmc_get_device_id(ipmi_smi_t intf, struct bmc_device *bmc,
-			     struct ipmi_device_id *id);
+			     struct ipmi_device_id *id,
+			     bool *guid_set, u8 *guid);
 
 /*
  * Various statistics for IPMI, these index stats[] in the ipmi_smi
@@ -1202,7 +1203,7 @@ int ipmi_get_version(ipmi_user_t   user,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(user->intf, NULL, &id);
+	rv = bmc_get_device_id(user->intf, NULL, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2083,12 +2084,21 @@ int ipmi_request_supply_msgs(ipmi_user_t          user,
 EXPORT_SYMBOL(ipmi_request_supply_msgs);
 
 static int bmc_get_device_id(ipmi_smi_t intf, struct bmc_device *bmc,
-			     struct ipmi_device_id *id)
+			     struct ipmi_device_id *id,
+			     bool *guid_set, u8 *guid)
 {
 	if (!bmc)
 		bmc = intf->bmc;
 
-	*id = bmc->id;
+	if (id)
+		*id = bmc->id;
+
+	if (guid_set)
+		*guid_set = bmc->guid_set;
+
+	if (guid && bmc->guid_set)
+		memcpy(guid, bmc->guid, 16);
+
 	return 0;
 }
 
@@ -2124,7 +2134,7 @@ static int smi_version_proc_show(struct seq_file *m, void *v)
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(intf, NULL, &id);
+	rv = bmc_get_device_id(intf, NULL, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2316,7 +2326,7 @@ static ssize_t device_id_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2332,7 +2342,7 @@ static ssize_t provides_device_sdrs_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2348,7 +2358,7 @@ static ssize_t revision_show(struct device *dev, struct device_attribute *attr,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2364,7 +2374,7 @@ static ssize_t firmware_revision_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2381,7 +2391,7 @@ static ssize_t ipmi_version_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2399,7 +2409,7 @@ static ssize_t add_dev_support_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2416,7 +2426,7 @@ static ssize_t manufacturer_id_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2432,7 +2442,7 @@ static ssize_t product_id_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2448,7 +2458,7 @@ static ssize_t aux_firmware_rev_show(struct device *dev,
 	struct ipmi_device_id id;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, &id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 	if (rv)
 		return rv;
 
@@ -2464,10 +2474,19 @@ static ssize_t guid_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct bmc_device *bmc = to_bmc_device(dev);
+	bool guid_set;
+	u8 guid[16];
+	int rv;
+
+	rv = bmc_get_device_id(NULL, bmc, NULL, &guid_set, guid);
+	if (rv)
+		return rv;
+	if (!guid_set)
+		return -ENOENT;
 
 	return snprintf(buf, 100, "%Lx%Lx\n",
-			(long long) bmc->guid[0],
-			(long long) bmc->guid[8]);
+			(long long) guid[0],
+			(long long) guid[8]);
 }
 static DEVICE_ATTR(guid, S_IRUGO, guid_show, NULL);
 
@@ -2491,15 +2510,20 @@ static umode_t bmc_dev_attr_is_visible(struct kobject *kobj,
 	struct device *dev = kobj_to_dev(kobj);
 	struct bmc_device *bmc = to_bmc_device(dev);
 	umode_t mode = attr->mode;
-	struct ipmi_device_id id;
 	int rv;
 
 	if (attr == &dev_attr_aux_firmware_revision.attr) {
-		rv = bmc_get_device_id(NULL, bmc, &id);
+		struct ipmi_device_id id;
+
+		rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
 		return (!rv && id.aux_firmware_revision_set) ? mode : 0;
 	}
-	if (attr == &dev_attr_guid.attr)
-		return bmc->guid_set ? mode : 0;
+	if (attr == &dev_attr_guid.attr) {
+		bool guid_set;
+
+		rv = bmc_get_device_id(NULL, bmc, NULL, &guid_set, NULL);
+		return (!rv && guid_set) ? mode : 0;
+	}
 	return mode;
 }
 
@@ -2520,11 +2544,20 @@ static const struct device_type bmc_device_type = {
 static int __find_bmc_guid(struct device *dev, void *data)
 {
 	unsigned char *id = data;
+	struct bmc_device *bmc;
+	bool guid_set;
+	u8 guid[16];
+	int rv;
 
 	if (dev->type != &bmc_device_type)
 		return 0;
 
-	return memcmp(to_bmc_device(dev)->guid, id, 16) == 0;
+	bmc = to_bmc_device(dev);
+	rv = bmc_get_device_id(NULL, bmc, NULL, &guid_set, guid);
+	if (rv || !guid_set)
+		return 0;
+
+	return memcmp(guid, id, 16) == 0;
 }
 
 /*
@@ -2553,15 +2586,21 @@ struct prod_dev_id {
 
 static int __find_bmc_prod_dev_id(struct device *dev, void *data)
 {
-	struct prod_dev_id *id = data;
+	struct prod_dev_id *cid = data;
 	struct bmc_device *bmc;
+	struct ipmi_device_id id;
+	int rv;
 
 	if (dev->type != &bmc_device_type)
 		return 0;
 
 	bmc = to_bmc_device(dev);
-	return (bmc->id.product_id == id->product_id
-		&& bmc->id.device_id == id->device_id);
+	rv = bmc_get_device_id(NULL, bmc, &id, NULL, NULL);
+	if (rv)
+		return 0;
+
+	return (id.product_id == cid->product_id
+		&& id.device_id == cid->device_id);
 }
 
 /*
@@ -3067,7 +3106,7 @@ int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 
 	get_guid(intf);
 
-	rv = bmc_get_device_id(intf, NULL, &id);
+	rv = bmc_get_device_id(intf, NULL, &id, NULL, NULL);
 	if (rv) {
 		dev_err(si_dev, "Unable to get the device id: %d\n", rv);
 		goto out;
