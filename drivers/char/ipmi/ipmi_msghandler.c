@@ -404,6 +404,7 @@ struct ipmi_smi {
 	wait_queue_head_t waitq;
 
 	struct bmc_device *bmc;
+	bool bmc_registered;
 	struct list_head bmc_link;
 	char *my_dev_name;
 
@@ -2605,18 +2606,20 @@ static void ipmi_bmc_unregister(ipmi_smi_t intf)
 {
 	struct bmc_device *bmc = intf->bmc;
 
+	if (!intf->bmc_registered)
+		return;
+
 	sysfs_remove_link(&intf->si_dev->kobj, "bmc");
-	if (intf->my_dev_name) {
-		sysfs_remove_link(&bmc->pdev.dev.kobj, intf->my_dev_name);
-		kfree(intf->my_dev_name);
-		intf->my_dev_name = NULL;
-	}
+	sysfs_remove_link(&bmc->pdev.dev.kobj, intf->my_dev_name);
+	kfree(intf->my_dev_name);
+	intf->my_dev_name = NULL;
 
 	mutex_lock(&ipmidriver_mutex);
 	list_del(&intf->bmc_link);
 	intf->bmc = NULL;
 	kref_put(&bmc->usecount, cleanup_bmc_device);
 	mutex_unlock(&ipmidriver_mutex);
+	intf->bmc_registered = false;
 }
 
 static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
@@ -2685,7 +2688,9 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 			if (bmc->id.device_id == orig_dev_id) {
 				printk(KERN_ERR PFX
 				       "Out of device ids!\n");
-				break;
+				mutex_unlock(&ipmidriver_mutex);
+				rv = -EAGAIN;
+				goto out;
 			}
 		}
 
@@ -2699,16 +2704,11 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 		list_add_tail(&intf->bmc_link, &bmc->intfs);
 		mutex_unlock(&ipmidriver_mutex);
 		if (rv) {
-			put_device(&bmc->pdev.dev);
 			printk(KERN_ERR
 			       "ipmi_msghandler:"
 			       " Unable to register bmc device: %d\n",
 			       rv);
-			/*
-			 * Don't go to out_err, you can only do that if
-			 * the device is registered already.
-			 */
-			return rv;
+			goto out_list_del;
 		}
 
 		dev_info(intf->si_dev, "Found new BMC (man_id: 0x%6.6x, "
@@ -2727,7 +2727,7 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 		printk(KERN_ERR
 		       "ipmi_msghandler: Unable to create bmc symlink: %d\n",
 		       rv);
-		goto out_err;
+		goto out_put_bmc;
 	}
 
 	intf->my_dev_name = kasprintf(GFP_KERNEL, "ipmi%d", ifnum);
@@ -2736,7 +2736,7 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 		printk(KERN_ERR
 		       "ipmi_msghandler: allocate link from BMC: %d\n",
 		       rv);
-		goto out_err;
+		goto out_unlink1;
 	}
 
 	rv = sysfs_create_link(&bmc->pdev.dev.kobj, &intf->si_dev->kobj,
@@ -2748,14 +2748,37 @@ static int ipmi_bmc_register(ipmi_smi_t intf, int ifnum)
 		       "ipmi_msghandler:"
 		       " Unable to create symlink to bmc: %d\n",
 		       rv);
-		goto out_err;
+		goto out_free_my_dev_name;
 	}
 
-	return 0;
+	intf->bmc_registered = true;
 
-out_err:
-	ipmi_bmc_unregister(intf);
+out:
 	return rv;
+
+
+out_free_my_dev_name:
+	kfree(intf->my_dev_name);
+	intf->my_dev_name = NULL;
+
+out_unlink1:
+	sysfs_remove_link(&intf->si_dev->kobj, "bmc");
+
+out_put_bmc:
+	mutex_lock(&ipmidriver_mutex);
+	list_del(&intf->bmc_link);
+	intf->bmc = NULL;
+	kref_put(&bmc->usecount, cleanup_bmc_device);
+	mutex_unlock(&ipmidriver_mutex);
+	goto out;
+
+out_list_del:
+	mutex_lock(&ipmidriver_mutex);
+	list_del(&intf->bmc_link);
+	intf->bmc = NULL;
+	mutex_unlock(&ipmidriver_mutex);
+	put_device(&bmc->pdev.dev);
+	goto out;
 }
 
 static int
@@ -3050,6 +3073,10 @@ int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 		goto out;
 	}
 
+	rv = ipmi_bmc_register(intf, i);
+	if (rv)
+		goto out;
+
 	if (ipmi_version_major(&id) > 1
 			|| (ipmi_version_major(&id) == 1
 			    && ipmi_version_minor(&id) >= 5)) {
@@ -3078,13 +3105,11 @@ int ipmi_register_smi(const struct ipmi_smi_handlers *handlers,
 		intf->curr_channel = IPMI_MAX_CHANNELS;
 	}
 
-	rv = ipmi_bmc_register(intf, i);
-
-	if (rv == 0)
-		rv = add_proc_entries(intf, i);
+	rv = add_proc_entries(intf, i);
 
  out:
 	if (rv) {
+		ipmi_bmc_unregister(intf);
 		if (intf->proc_dir)
 			remove_proc_entries(intf);
 		intf->handlers = NULL;
