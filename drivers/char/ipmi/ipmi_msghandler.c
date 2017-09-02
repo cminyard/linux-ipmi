@@ -48,6 +48,7 @@
 #include <linux/interrupt.h>
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
+#include <linux/uuid.h>
 
 #define PFX "IPMI message handler: "
 
@@ -286,8 +287,8 @@ struct bmc_device {
 	int                    dyn_id_set;
 	unsigned long          dyn_id_expiry;
 	struct mutex           dyn_mutex; /* Protects id, intfs, & dyn* */
-	u8                     guid[16];
-	u8                     fetch_guid[16];
+	guid_t                 guid;
+	guid_t                 fetch_guid;
 	int                    dyn_guid_set;
 	struct kref	       usecount;
 	struct work_struct     remove_work;
@@ -296,7 +297,7 @@ struct bmc_device {
 
 static int bmc_get_device_id(ipmi_smi_t intf, struct bmc_device *bmc,
 			     struct ipmi_device_id *id,
-			     bool *guid_set, u8 *guid);
+			     bool *guid_set, guid_t *guid);
 
 /*
  * Various statistics for IPMI, these index stats[] in the ipmi_smi
@@ -554,7 +555,7 @@ static void __get_guid(ipmi_smi_t intf);
 static void __ipmi_bmc_unregister(ipmi_smi_t intf);
 static int __ipmi_bmc_register(ipmi_smi_t intf,
 			       struct ipmi_device_id *id,
-			       bool guid_set, u8 *guid, int intf_num);
+			       bool guid_set, guid_t *guid, int intf_num);
 static int __scan_channels(ipmi_smi_t intf, struct ipmi_device_id *id);
 
 
@@ -2218,7 +2219,7 @@ static int __get_device_id(ipmi_smi_t intf, struct bmc_device *bmc)
  */
 static int __bmc_get_device_id(ipmi_smi_t intf, struct bmc_device *bmc,
 			       struct ipmi_device_id *id,
-			       bool *guid_set, u8 *guid, int intf_num)
+			       bool *guid_set, guid_t *guid, int intf_num)
 {
 	int rv = 0;
 	int prev_dyn_id_set, prev_guid_set;
@@ -2271,23 +2272,23 @@ retry_bmc_lock:
 	    || (!prev_guid_set && bmc->dyn_guid_set)
 	    || (!prev_dyn_id_set && bmc->dyn_id_set)
 	    || (prev_guid_set && bmc->dyn_guid_set
-		&& memcmp(bmc->guid, bmc->fetch_guid, 16))
+		&& !guid_equal(&bmc->guid, &bmc->fetch_guid))
 	    || bmc->id.device_id != bmc->fetch_id.device_id
 	    || bmc->id.manufacturer_id != bmc->fetch_id.manufacturer_id
 	    || bmc->id.product_id != bmc->fetch_id.product_id) {
 		struct ipmi_device_id id = bmc->fetch_id;
 		int guid_set = bmc->dyn_guid_set;
-		u8 guid[16];
+		guid_t guid;
 
-		memcpy(guid, bmc->fetch_guid, 16);
+		guid = bmc->fetch_guid;
 		mutex_unlock(&bmc->dyn_mutex);
 
 		__ipmi_bmc_unregister(intf);
 		/* Fill in the temporary BMC for good measure. */
 		intf->bmc->id = id;
 		intf->bmc->dyn_guid_set = guid_set;
-		memcpy(intf->bmc->guid, guid, 16);
-		if (__ipmi_bmc_register(intf, &id, guid_set, guid, intf_num))
+		intf->bmc->guid = guid;
+		if (__ipmi_bmc_register(intf, &id, guid_set, &guid, intf_num))
 			need_waiter(intf); /* Retry later on an error. */
 
 		__scan_channels(intf, &id);
@@ -2322,7 +2323,7 @@ out:
 	if (!rv) {
 		bmc->id = bmc->fetch_id;
 		if (bmc->dyn_guid_set)
-			memcpy(bmc->guid, bmc->fetch_guid, 16);
+			bmc->guid = bmc->fetch_guid;
 		else if (prev_guid_set)
 			/*
 			 * The guid used to be valid and it failed to fetch,
@@ -2339,7 +2340,7 @@ out_noprocessing:
 			*guid_set = bmc->dyn_guid_set;
 
 		if (guid && bmc->dyn_guid_set)
-			memcpy(guid, bmc->guid, 16);
+			*guid =  bmc->guid;
 	}
 
 	mutex_unlock(&bmc->dyn_mutex);
@@ -2351,7 +2352,7 @@ out_noprocessing:
 
 static int bmc_get_device_id(ipmi_smi_t intf, struct bmc_device *bmc,
 			     struct ipmi_device_id *id,
-			     bool *guid_set, u8 *guid)
+			     bool *guid_set, guid_t *guid)
 {
 	return __bmc_get_device_id(intf, bmc, id, guid_set, guid, -1);
 }
@@ -2724,23 +2725,44 @@ static ssize_t aux_firmware_rev_show(struct device *dev,
 }
 static DEVICE_ATTR(aux_firmware_revision, S_IRUGO, aux_firmware_rev_show, NULL);
 
+/*
+ * Partially stolen from lib/uuid.c, remove this if a guid_to_str()
+ * gets added there.
+ */
+static int ipmi_guid_to_str(char *str, unsigned int len, const guid_t *guid)
+{
+	const __u8 *b = guid->b;
+	const u8 ei[16] = {3,2,1,0,5,4,7,6,8,9,10,11,12,13,14,15};
+	unsigned int rv;
+
+	rv = snprintf(str, len,
+		      "%2.2x%2.2x%2.2x%2.2x-%2.2x%2.2x-%2.2x%2.2x-%2.2x%2.2x-%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x",
+		      b[ei[0]], b[ei[1]], b[ei[2]], b[ei[3]],
+		      b[ei[4]], b[ei[5]], b[ei[6]], b[ei[7]],
+		      b[ei[8]], b[ei[9]], b[ei[10]], b[ei[11]],
+		      b[ei[12]], b[ei[13]], b[ei[14]], b[ei[15]]);
+	if (rv >= len)
+		rv = len - 1;
+	return rv;
+}
+
 static ssize_t guid_show(struct device *dev, struct device_attribute *attr,
 			 char *buf)
 {
 	struct bmc_device *bmc = to_bmc_device(dev);
 	bool guid_set;
-	u8 guid[16];
+	guid_t guid;
 	int rv;
 
-	rv = bmc_get_device_id(NULL, bmc, NULL, &guid_set, guid);
+	rv = bmc_get_device_id(NULL, bmc, NULL, &guid_set, &guid);
 	if (rv)
 		return rv;
 	if (!guid_set)
 		return -ENOENT;
 
-	return snprintf(buf, 100, "%Lx%Lx\n",
-			(long long) guid[0],
-			(long long) guid[8]);
+	rv = ipmi_guid_to_str(buf, 100, &guid);
+	strcpy(buf + rv, "\n");
+	return rv + 1;
 }
 static DEVICE_ATTR(guid, S_IRUGO, guid_show, NULL);
 
@@ -2797,7 +2819,7 @@ static const struct device_type bmc_device_type = {
 
 static int __find_bmc_guid(struct device *dev, void *data)
 {
-	unsigned char *guid = data;
+	guid_t *guid = data;
 	struct bmc_device *bmc;
 	int rv;
 
@@ -2805,7 +2827,7 @@ static int __find_bmc_guid(struct device *dev, void *data)
 		return 0;
 
 	bmc = to_bmc_device(dev);
-	rv = bmc->dyn_guid_set && memcmp(bmc->guid, guid, 16) == 0;
+	rv = bmc->dyn_guid_set && guid_equal(&bmc->guid, guid);
 	if (rv)
 		rv = kref_get_unless_zero(&bmc->usecount);
 	return rv;
@@ -2815,7 +2837,7 @@ static int __find_bmc_guid(struct device *dev, void *data)
  * Returns with the bmc's usecount incremented, if it is non-NULL.
  */
 static struct bmc_device *ipmi_find_bmc_guid(struct device_driver *drv,
-					     unsigned char *guid)
+					     guid_t *guid)
 {
 	struct device *dev;
 	struct bmc_device *bmc = NULL;
@@ -2938,7 +2960,7 @@ static void ipmi_bmc_unregister(ipmi_smi_t intf)
  */
 static int __ipmi_bmc_register(ipmi_smi_t intf,
 			       struct ipmi_device_id *id,
-			       bool guid_set, u8 *guid, int intf_num)
+			       bool guid_set, guid_t *guid, int intf_num)
 {
 	int               rv;
 	struct bmc_device *bmc = intf->bmc;
@@ -2999,7 +3021,7 @@ static int __ipmi_bmc_register(ipmi_smi_t intf,
 		bmc->id = *id;
 		bmc->dyn_id_set = 1;
 		bmc->dyn_guid_set = guid_set;
-		memcpy(bmc->guid, guid, 16);
+		bmc->guid = *guid;
 		bmc->dyn_id_expiry = jiffies + IPMI_DYN_DEV_ID_EXPIRY;
 
 		bmc->pdev.name = "ipmi_bmc";
@@ -3156,7 +3178,7 @@ static void guid_handler(ipmi_smi_t intf, struct ipmi_recv_msg *msg)
 		goto out;
 	}
 
-	memcpy(bmc->fetch_guid, msg->msg.data + 1, 16);
+	memcpy(bmc->fetch_guid.b, msg->msg.data + 1, 16);
 	/*
 	 * Make sure the guid data is available before setting
 	 * dyn_guid_set.
