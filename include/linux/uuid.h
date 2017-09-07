@@ -83,6 +83,13 @@ extern const u8 uuid_index[16];
 int guid_parse(const char *uuid, guid_t *u);
 int uuid_parse(const char *uuid, uuid_t *u);
 
+/*
+ * Returns the number of bytes put into the string, not including the
+ * terminating null byte.
+ */
+int guid_to_str(char *str, unsigned int len, const guid_t *guid);
+int uuid_to_str(char *str, unsigned int len, const uuid_t *uuid);
+
 /* backwards compatibility, don't use in new code */
 #define uuid_le_gen(u)		guid_gen(u)
 #define uuid_le_to_bin(guid, u)	guid_parse(guid, u)

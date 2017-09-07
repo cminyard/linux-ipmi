@@ -129,3 +129,31 @@ int uuid_parse(const char *uuid, uuid_t *u)
 	return __uuid_parse(uuid, u->b, uuid_index);
 }
 EXPORT_SYMBOL(uuid_parse);
+
+static int __uuid_to_str(char *str, unsigned int len, const __u8 b[16],
+			 const u8 ei[16])
+{
+	unsigned int rv;
+
+	rv = snprintf(str, len,
+		      "%2.2x%2.2x%2.2x%2.2x-%2.2x%2.2x-%2.2x%2.2x-%2.2x%2.2x-%2.2x%2.2x%2.2x%2.2x%2.2x%2.2x",
+			b[ei[0]], b[ei[1]], b[ei[2]], b[ei[3]],
+			b[ei[4]], b[ei[5]], b[ei[6]], b[ei[7]],
+			b[ei[8]], b[ei[9]], b[ei[10]], b[ei[11]],
+			b[ei[12]], b[ei[13]], b[ei[14]], b[ei[15]]);
+	if (rv >= len)
+		rv = len - 1;
+	return rv;
+}
+
+int guid_to_str(char *str, unsigned int len, const guid_t *guid)
+{
+	return __uuid_to_str(str, len, guid->b, guid_index);
+}
+EXPORT_SYMBOL(guid_to_str);
+
+int uuid_to_str(char *str, unsigned int len, const uuid_t *uuid)
+{
+	return __uuid_to_str(str, len, uuid->b, uuid_index);
+}
+EXPORT_SYMBOL(uuid_to_str);
