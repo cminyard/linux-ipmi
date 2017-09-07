@@ -282,7 +282,6 @@ struct bmc_device {
 	u8                     guid[16];
 	u8                     fetch_guid[16];
 	int                    dyn_guid_set;
-	char                   name[16];
 	struct kref	       usecount;
 	struct work_struct     remove_work;
 };
@@ -2854,6 +2853,8 @@ static struct bmc_device *ipmi_find_bmc_prod_dev_id(
 	return bmc;
 }
 
+static DEFINE_IDA(ipmi_bmc_ida);
+
 static void
 release_bmc_device(struct device *dev)
 {
@@ -2864,8 +2865,10 @@ static void cleanup_bmc_work(struct work_struct *work)
 {
 	struct bmc_device *bmc = container_of(work, struct bmc_device,
 					      remove_work);
+	int id = bmc->pdev.id; /* Unregister overwrites id */
 
 	platform_device_unregister(&bmc->pdev);
+	ida_simple_remove(&ipmi_bmc_ida, id);
 }
 
 static void
@@ -2965,10 +2968,6 @@ static int __ipmi_bmc_register(ipmi_smi_t intf,
 		       bmc->id.product_id,
 		       bmc->id.device_id);
 	} else {
-		u8 working_dev_id = id->device_id;
-		int warn_printed = 0;
-		struct bmc_device *tmp_bmc;
-
 		bmc = kzalloc(sizeof(*bmc), GFP_KERNEL);
 		if (!bmc) {
 			rv = -ENOMEM;
@@ -2984,37 +2983,13 @@ static int __ipmi_bmc_register(ipmi_smi_t intf,
 		memcpy(bmc->guid, guid, 16);
 		bmc->dyn_id_expiry = jiffies + IPMI_DYN_DEV_ID_EXPIRY;
 
-		snprintf(bmc->name, sizeof(bmc->name),
-			 "ipmi_bmc.%4.4x", bmc->id.product_id);
-		bmc->pdev.name = bmc->name;
+		bmc->pdev.name = "ipmi_bmc";
 
-		while ((tmp_bmc = ipmi_find_bmc_prod_dev_id(&ipmidriver.driver,
-						 id->product_id,
-						 id->device_id))) {
-			kref_put(&tmp_bmc->usecount, cleanup_bmc_device);
-			if (!warn_printed) {
-				printk(KERN_WARNING PFX
-				       "This machine has two different BMCs"
-				       " with the same product id and device"
-				       " id.  This is an error in the"
-				       " firmware, but incrementing the"
-				       " device id to work around the problem."
-				       " Prod ID = 0x%x, Dev ID = 0x%x\n",
-				       bmc->id.product_id, bmc->id.device_id);
-				warn_printed = 1;
-			}
-			working_dev_id++; /* Wraps at 255 */
-			if (bmc->id.device_id == working_dev_id) {
-				printk(KERN_ERR PFX
-				       "Out of device ids!\n");
-				kfree(bmc);
-				rv = -EAGAIN;
-				goto out;
-			}
-		}
-
+		rv = ida_simple_get(&ipmi_bmc_ida, 0, 0, GFP_KERNEL);
+		if (rv < 0)
+			goto out;
 		bmc->pdev.dev.driver = &ipmidriver.driver;
-		bmc->pdev.id = working_dev_id;
+		bmc->pdev.id = rv;
 		bmc->pdev.dev.release = release_bmc_device;
 		bmc->pdev.dev.type = &bmc_device_type;
 		kref_init(&bmc->usecount);
