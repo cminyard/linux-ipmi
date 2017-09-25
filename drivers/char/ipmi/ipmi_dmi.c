@@ -80,7 +80,7 @@ static void __init dmi_add_platform_ipmi(unsigned long base_addr,
 		si_type = SI_SMIC;
 		break;
 	default:
-		pr_err("ipmi:dmi: Invalid IPMI type: %d", type);
+		pr_err("ipmi:dmi: Invalid IPMI type: %d\n", type);
 		return;
 	}
 
@@ -103,7 +103,7 @@ static void __init dmi_add_platform_ipmi(unsigned long base_addr,
 
 	pdev = platform_device_alloc(name, ipmi_dmi_nr);
 	if (!pdev) {
-		pr_err("ipmi:dmi: Error allocation IPMI platform device");
+		pr_err("ipmi:dmi: Error allocation IPMI platform device\n");
 		return;
 	}
 	pdev->driver_override = override;
@@ -268,7 +268,7 @@ static void __init dmi_decode_ipmi(const struct dmi_header *dm)
 				offset = 16;
 				break;
 			default:
-				pr_err("ipmi:dmi: Invalid offset: 0");
+				pr_err("ipmi:dmi: Invalid offset: 0\n");
 				return;
 			}
 		}
