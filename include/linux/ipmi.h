@@ -96,6 +96,14 @@ struct ipmi_user_hndl {
 	/* Called when the interface detects a watchdog pre-timeout.  If
 	   this is NULL, it will be ignored for the user. */
 	void (*ipmi_watchdog_pretimeout)(void *handler_data);
+
+	/*
+	 * Called when the interface has been removed.  After this returns
+	 * the user handle will be invalid.  The interface may or may
+	 * not be usable when this is called, but it will return errors
+	 * if it is not usable.
+	 */
+	void (*shutdown)(void *handler_data);
 };
 
 /* Create a new user of the IPMI layer on the given interface number. */
