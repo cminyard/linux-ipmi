@@ -297,7 +297,7 @@ struct smi_info {
 	 * True if we allocated the device, false if it came from
 	 * someplace else (like PCI).
 	 */
-	bool dev_registered;
+	bool pdev_registered;
 
 	/* Slave address, could be reported from DMI. */
 	unsigned char slave_addr;
@@ -334,7 +334,7 @@ static bool unload_when_empty = true;
 
 static int add_smi(struct smi_info *smi);
 static int try_smi_init(struct smi_info *smi);
-static void cleanup_one_si(struct smi_info *to_clean);
+static void cleanup_one_si(struct smi_info *smi_info);
 static void cleanup_ipmi_si(void);
 
 #ifdef DEBUG_TIMING
@@ -1288,9 +1288,11 @@ static void set_maintenance_mode(void *send_info, bool enable)
 		atomic_set(&smi_info->req_events, 0);
 }
 
+static void shutdown_smi(void *send_info);
 static const struct ipmi_smi_handlers handlers = {
 	.owner                  = THIS_MODULE,
 	.start_processing       = smi_start_processing,
+	.shutdown               = shutdown_smi,
 	.get_smi_info		= get_smi_info,
 	.sender			= sender,
 	.request_events		= request_events,
@@ -3612,7 +3614,7 @@ static int try_smi_init(struct smi_info *new_smi)
 				rv);
 			goto out_err;
 		}
-		new_smi->dev_registered = true;
+		new_smi->pdev_registered = true;
 	}
 
 	rv = ipmi_register_smi(&handlers,
@@ -3698,15 +3700,6 @@ out_err:
 	if (new_smi->io_cleanup) {
 		new_smi->io_cleanup(new_smi);
 		new_smi->io_cleanup = NULL;
-	}
-
-	if (new_smi->dev_registered) {
-		platform_device_unregister(new_smi->pdev);
-		new_smi->dev_registered = false;
-		new_smi->pdev = NULL;
-	} else if (new_smi->pdev) {
-		platform_device_put(new_smi->pdev);
-		new_smi->pdev = NULL;
 	}
 
 	kfree(init_name);
@@ -3825,66 +3818,66 @@ static int init_ipmi_si(void)
 }
 module_init(init_ipmi_si);
 
-static void cleanup_one_si(struct smi_info *to_clean)
+static void shutdown_smi(void *send_info)
 {
-	int           rv = 0;
+	struct smi_info *smi_info = send_info;
 
-	if (!to_clean)
-		return;
-
-	if (to_clean->intf) {
-		ipmi_smi_t intf = to_clean->intf;
-
-		to_clean->intf = NULL;
-		rv = ipmi_unregister_smi(intf);
-		if (rv) {
-			pr_err(PFX "Unable to unregister device: errno=%d\n",
-			       rv);
-		}
-	}
-
-	if (to_clean->dev)
-		dev_set_drvdata(to_clean->dev, NULL);
-
-	list_del(&to_clean->link);
+	dev_set_drvdata(smi_info->dev, NULL);
 
 	/*
 	 * Make sure that interrupts, the timer and the thread are
 	 * stopped and will not run again.
 	 */
-	if (to_clean->irq_cleanup)
-		to_clean->irq_cleanup(to_clean);
-	wait_for_timer_and_thread(to_clean);
+	if (smi_info->irq_cleanup)
+		smi_info->irq_cleanup(smi_info);
+	wait_for_timer_and_thread(smi_info);
 
 	/*
 	 * Timeouts are stopped, now make sure the interrupts are off
 	 * in the BMC.  Note that timers and CPU interrupts are off,
 	 * so no need for locks.
 	 */
-	while (to_clean->curr_msg || (to_clean->si_state != SI_NORMAL)) {
-		poll(to_clean);
+	while (smi_info->curr_msg || (smi_info->si_state != SI_NORMAL)) {
+		poll(smi_info);
 		schedule_timeout_uninterruptible(1);
 	}
-	disable_si_irq(to_clean, false);
-	while (to_clean->curr_msg || (to_clean->si_state != SI_NORMAL)) {
-		poll(to_clean);
+	if (smi_info->handlers)
+		disable_si_irq(smi_info, false);
+	while (smi_info->curr_msg || (smi_info->si_state != SI_NORMAL)) {
+		poll(smi_info);
 		schedule_timeout_uninterruptible(1);
 	}
 
-	if (to_clean->handlers)
-		to_clean->handlers->cleanup(to_clean->si_sm);
+	if (smi_info->handlers)
+		smi_info->handlers->cleanup(smi_info->si_sm);
 
-	kfree(to_clean->si_sm);
+	if (smi_info->addr_source_cleanup)
+		smi_info->addr_source_cleanup(smi_info);
+	if (smi_info->io_cleanup)
+		smi_info->io_cleanup(smi_info);
+}
 
-	if (to_clean->addr_source_cleanup)
-		to_clean->addr_source_cleanup(to_clean);
-	if (to_clean->io_cleanup)
-		to_clean->io_cleanup(to_clean);
+static void cleanup_one_si(struct smi_info *smi_info)
+{
+	ipmi_smi_t intf;
 
-	if (to_clean->dev_registered)
-		platform_device_unregister(to_clean->pdev);
+	if (!smi_info)
+		return;
 
-	kfree(to_clean);
+	intf = smi_info->intf;
+	if (intf) {
+		smi_info->intf = NULL;
+		ipmi_unregister_smi(intf);
+	}
+
+	list_del(&smi_info->link);
+
+	if (smi_info->pdev_registered)
+		platform_device_unregister(smi_info->pdev);
+	else if (smi_info->pdev)
+		platform_device_put(smi_info->pdev);
+
+	kfree(smi_info);
 }
 
 static void cleanup_ipmi_si(void)
