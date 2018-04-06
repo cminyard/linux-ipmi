@@ -1229,25 +1229,9 @@ static const struct attribute_group ipmi_ssif_dev_attr_group = {
 	.attrs		= ipmi_ssif_dev_attrs,
 };
 
-static int ssif_remove(struct i2c_client *client)
+static void shutdown_ssif(void *send_info)
 {
-	struct ssif_info *ssif_info = i2c_get_clientdata(client);
-	struct ssif_addr_info *addr_info;
-	int rv;
-
-	if (!ssif_info)
-		return 0;
-
-	/*
-	 * After this point, we won't deliver anything asychronously
-	 * to the message handler.  We can unregister ourself.
-	 */
-	rv = ipmi_unregister_smi(ssif_info->intf);
-	if (rv) {
-		pr_err(PFX "Unable to unregister device: errno=%d\n", rv);
-		return rv;
-	}
-	ssif_info->intf = NULL;
+	struct ssif_info *ssif_info = send_info;
 
 	device_remove_group(&ssif_info->client->dev, &ipmi_ssif_dev_attr_group);
 	dev_set_drvdata(&ssif_info->client->dev, NULL);
@@ -1262,6 +1246,27 @@ static int ssif_remove(struct i2c_client *client)
 		complete(&ssif_info->wake_thread);
 		kthread_stop(ssif_info->thread);
 	}
+}
+
+static int ssif_remove(struct i2c_client *client)
+{
+	struct ssif_info *ssif_info = i2c_get_clientdata(client);
+	struct ipmi_smi *intf;
+	struct ssif_addr_info *addr_info;
+	int rv;
+
+	if (!ssif_info)
+		return 0;
+
+	/*
+	 * After this point, we won't deliver anything asychronously
+	 * to the message handler.  We can unregister ourself.
+	 */
+	intf = ssif_info->intf;
+	ssif_info->intf = NULL;
+	ipmi_unregister_smi(intf);
+
+	kfree(ssif_info);
 
 	list_for_each_entry(addr_info, &ssif_infos, link) {
 		if (addr_info->client == client) {
@@ -1270,12 +1275,7 @@ static int ssif_remove(struct i2c_client *client)
 		}
 	}
 
-	/*
-	 * No message can be outstanding now, we have removed the
-	 * upper layer and it permitted us to do so.
-	 */
-	kfree(ssif_info);
-	return 0;
+	return rv;
 }
 
 static int do_cmd(struct i2c_client *client, int len, unsigned char *msg,
@@ -1702,6 +1702,7 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	ssif_info->handlers.owner = THIS_MODULE;
 	ssif_info->handlers.start_processing = ssif_start_processing;
+	ssif_info->handlers.shutdown = shutdown_ssif;
 	ssif_info->handlers.get_smi_info = get_smi_info;
 	ssif_info->handlers.sender = sender;
 	ssif_info->handlers.request_events = request_events;
