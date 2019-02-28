@@ -1565,4 +1565,14 @@ endmenu
 config SERIAL_MCTRL_GPIO
 	tristate
 
+config SERIAL_SIMULATOR
+	tristate "Serial port simulator"
+	default n
+	help
+	  Support for a simulated device that behaves like a normal
+	  serial port.  It has echo devices and pipe devices.  This
+	  is useful for testing programs that use serial ports.
+
+	  If unsure, say N.
+
 endif # TTY

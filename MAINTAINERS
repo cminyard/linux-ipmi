@@ -13702,6 +13702,13 @@ L:	linux-media@vger.kernel.org
 S:	Maintained
 F:	drivers/media/rc/serial_ir.c
 
+SERIAL PORT SIMULATOR
+M:	Corey Minyard <cminyard@mvista.com>
+S:	Maintained
+F:	Documentation/serial/serialsim.rst
+F:	drivers/tty/serial/serialsim.c
+F:	include/uapi/linux/serialsim.h
+
 SFC NETWORK DRIVER
 M:	Solarflare linux maintainers <linux-net-drivers@solarflare.com>
 M:	Edward Cree <ecree@solarflare.com>
