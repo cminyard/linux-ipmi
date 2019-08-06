@@ -105,6 +105,14 @@ config WATCHDOG_PRETIMEOUT_GOV_PANIC
 	  Panic watchdog pretimeout governor, on watchdog pretimeout
 	  event put the kernel into panic.
 
+config WATCHDOG_PRETIMEOUT_GOV_READ_DATA
+	tristate "Read data watchdog pretimeout governor"
+	depends on WATCHDOG_CORE
+	default WATCHDOG_CORE
+	help
+	  Read data watchdog pretimeout governor, on watchdog pretimeout
+	  event provide a byte of data on the watchdog device.
+
 choice
 	prompt "Default Watchdog Pretimeout Governor"
 	default WATCHDOG_PRETIMEOUT_DEFAULT_GOV_PANIC
@@ -128,6 +136,14 @@ config WATCHDOG_PRETIMEOUT_DEFAULT_GOV_PANIC
 	  Use panic watchdog pretimeout governor by default, if
 	  a watchdog pretimeout event happens, consider that
 	  a watchdog feeder is dead and reboot is unavoidable.
+
+config WATCHDOG_PRETIMEOUT_DEFAULT_GOV_READ_DATA
+	bool "read_data"
+	depends on WATCHDOG_PRETIMEOUT_GOV_READ_DATA
+	help
+	  Use read data watchdog pretimeout governor by default, if
+	  a watchdog pretimeout event happens, provide a byte of read
+	  data on the watchdog device.
 
 endchoice
 

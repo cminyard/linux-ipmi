@@ -28,6 +28,8 @@ int watchdog_pretimeout_governor_set(struct watchdog_device *wdd,
 #define WATCHDOG_PRETIMEOUT_DEFAULT_GOV		"noop"
 #elif IS_ENABLED(CONFIG_WATCHDOG_PRETIMEOUT_DEFAULT_GOV_PANIC)
 #define WATCHDOG_PRETIMEOUT_DEFAULT_GOV		"panic"
+#elif IS_ENABLED(CONFIG_WATCHDOG_PRETIMEOUT_DEFAULT_GOV_READ_DATA)
+#define WATCHDOG_PRETIMEOUT_DEFAULT_GOV		"read_data"
 #endif
 
 #else
