@@ -162,6 +162,8 @@ void watchdog_unregister_governor(struct watchdog_governor *gov)
 			break;
 		}
 	}
+	if (gov == default_gov)
+		default_gov = NULL;
 
 	spin_lock_irq(&pretimeout_lock);
 	list_for_each_entry(p, &pretimeout_list, entry)
