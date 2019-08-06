@@ -216,6 +216,9 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 		return id;
 	wdd->id = id;
 
+	spin_lock_init(&wdd->readlock);
+	init_waitqueue_head(&wdd->read_q);
+
 	ret = watchdog_dev_register(wdd);
 	if (ret) {
 		ida_simple_remove(&watchdog_ida, id);

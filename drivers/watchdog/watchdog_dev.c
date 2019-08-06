@@ -44,6 +44,8 @@
 #include <linux/types.h>	/* For standard types (like size_t) */
 #include <linux/watchdog.h>	/* For watchdog specific items */
 #include <linux/uaccess.h>	/* For copy_to_user/put_user/... */
+#include <linux/poll.h>		/* For poll_table/... */
+#include <linux/sched/signal.h>	/* For signal_pending */
 
 #include <uapi/linux/sched/types.h>	/* For struct sched_param */
 
@@ -929,12 +931,120 @@ done:
 	return 0;
 }
 
+static ssize_t watchdog_read(struct file *file,
+			     char        __user *buf,
+			     size_t      count,
+			     loff_t      *ppos)
+{
+	struct watchdog_core_data *wd_data = file->private_data;
+	struct watchdog_device *wdd;
+	int err = 0;
+	wait_queue_entry_t wait;
+	char dummy = 1;
+
+	if (count <= 0)
+		return 0;
+
+	mutex_lock(&wd_data->lock);
+
+	wdd = wd_data->wdd;
+	if (!wdd)
+		goto done;
+
+	/*
+	 * Reading returns if the pretimeout has gone off, and it only does
+	 * it once per pretimeout.
+	 */
+	spin_lock_irq(&wdd->readlock);
+	while (!wdd->data_to_read) {
+		if (file->f_flags & O_NONBLOCK) {
+			err = -EAGAIN;
+			goto out;
+		}
+
+		init_waitqueue_entry(&wait, current);
+		add_wait_queue(&wdd->read_q, &wait);
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_unlock_irq(&wdd->readlock);
+		schedule();
+		spin_lock_irq(&wdd->readlock);
+		remove_wait_queue(&wdd->read_q, &wait);
+
+		if (signal_pending(current)) {
+			err = -ERESTARTSYS;
+			goto out;
+		}
+	}
+	dummy = wdd->data_to_read;
+	wdd->data_to_read = 0;
+
+ out:
+	spin_unlock_irq(&wdd->readlock);
+
+	if (err == 0) {
+		if (copy_to_user(buf, &dummy, 1))
+			err = -EFAULT;
+		else
+			err = 1;
+	}
+
+ done:
+	mutex_unlock(&wd_data->lock);
+
+	return err;
+}
+
+static __poll_t watchdog_poll(struct file *file, poll_table *wait)
+{
+	struct watchdog_core_data *wd_data = file->private_data;
+	struct watchdog_device *wdd;
+	__poll_t mask = 0;
+
+	mutex_lock(&wd_data->lock);
+
+	wdd = wd_data->wdd;
+	if (!wdd)
+		goto done;
+
+	poll_wait(file, &wdd->read_q, wait);
+
+	spin_lock_irq(&wdd->readlock);
+	if (wdd->data_to_read)
+		mask |= (EPOLLIN | EPOLLRDNORM);
+	spin_unlock_irq(&wdd->readlock);
+
+done:
+	mutex_unlock(&wd_data->lock);
+	return mask;
+}
+
+static int watchdog_fasync(int fd, struct file *file, int on)
+{
+	struct watchdog_core_data *wd_data = file->private_data;
+	struct watchdog_device *wdd;
+	int err = -ENODEV;
+
+	mutex_lock(&wd_data->lock);
+
+	wdd = wd_data->wdd;
+	if (!wdd)
+		goto done;
+
+	err = fasync_helper(fd, file, on, &wdd->fasync_q);
+done:
+	mutex_unlock(&wd_data->lock);
+	return err;
+}
+
 static const struct file_operations watchdog_fops = {
 	.owner		= THIS_MODULE,
 	.write		= watchdog_write,
 	.unlocked_ioctl	= watchdog_ioctl,
 	.open		= watchdog_open,
 	.release	= watchdog_release,
+	.read		= watchdog_read,
+	.poll		= watchdog_poll,
+	.fasync		= watchdog_fasync,
 };
 
 static struct miscdevice watchdog_miscdev = {
@@ -969,6 +1079,9 @@ static int watchdog_cdev_register(struct watchdog_device *wdd, dev_t devno)
 
 	if (IS_ERR_OR_NULL(watchdog_kworker))
 		return -ENODEV;
+
+	spin_lock_init(&wdd->readlock);
+	init_waitqueue_head(&wdd->read_q);
 
 	kthread_init_work(&wd_data->work, watchdog_ping_work);
 	hrtimer_init(&wd_data->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);

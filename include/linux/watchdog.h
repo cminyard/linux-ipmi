@@ -117,6 +117,11 @@ struct watchdog_device {
 #define WDOG_HW_RUNNING		3	/* True if HW watchdog running */
 #define WDOG_STOP_ON_UNREGISTER	4	/* Should be stopped on unregister */
 	struct list_head deferred;
+
+	spinlock_t readlock;
+	bool data_to_read;
+	struct wait_queue_head read_q;
+	struct fasync_struct *fasync_q;
 };
 
 #define WATCHDOG_NOWAYOUT		IS_BUILTIN(CONFIG_WATCHDOG_NOWAYOUT)
