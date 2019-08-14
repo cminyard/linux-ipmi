@@ -757,6 +757,62 @@ static int _ipmi_heartbeat(struct ipmi_wdt *iwd)
 	return rv;
 }
 
+static unsigned int ipmi_wdt_get_timeleft(struct watchdog_device *wdd)
+{
+	struct ipmi_wdt *iwd = wdd_to_ipmi_wdt(wdd);
+	struct kernel_ipmi_msg msg;
+	int rv = 0;
+	struct ipmi_system_interface_addr addr;
+
+	mutex_lock(&iwd->lock);
+	if (iwd->state == WDOG_TIMEOUT_NONE)
+		goto out_unlock;
+
+	addr.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+	addr.channel = IPMI_BMC_CHANNEL;
+	addr.lun = 0;
+
+	atomic_set(&iwd->msg_tofree, 2);
+
+	msg.netfn = 0x06;
+	msg.cmd = IPMI_WDOG_GET_TIMER;
+	msg.data = NULL;
+	msg.data_len = 0;
+	rv = ipmi_request_supply_msgs(iwd->user,
+				      (struct ipmi_addr *) &addr,
+				      0,
+				      &msg,
+				      NULL,
+				      &iwd->smi_msg,
+				      &iwd->recv_msg,
+				      1);
+	if (rv) {
+		pr_warn("get timeout error: %d\n", rv);
+		goto out_unlock;
+	}
+
+	wait_msg_done(iwd, false);
+
+	if (iwd->recv_msg.msg.data[0] != 0)  {
+		pr_warn("get timeout IPMI error: %d\n",
+			iwd->recv_msg.msg.data[0]);
+		goto out_unlock;
+	}
+
+	if (iwd->recv_msg.msg.data_len < 9) {
+		pr_warn("get timeout IPMI response too short: %d\n",
+			iwd->recv_msg.msg.data_len);
+		goto out_unlock;
+	}
+
+	rv = iwd->recv_msg.msg.data[8] << 8 | iwd->recv_msg.msg.data[7];
+	rv /= 10; /* IPMI time is in 100s of milliseconds. */
+
+out_unlock:
+	mutex_unlock(&iwd->lock);
+	return rv;
+}
+
 static void ipmi_wdog_msg_handler(struct ipmi_recv_msg *msg,
 				  void                 *handler_data)
 {
@@ -880,6 +936,7 @@ static const struct watchdog_ops ipmi_wdt_ops = {
 	.ping		= ipmi_wdt_ping,
 	.set_timeout	= ipmi_wdt_set_timeout,
 	.set_pretimeout = ipmi_wdt_set_pretimeout,
+	.get_timeleft   = ipmi_wdt_get_timeleft,
 };
 
 static const struct ipmi_user_hndl ipmi_hndlrs = {
