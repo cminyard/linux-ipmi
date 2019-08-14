@@ -32,6 +32,10 @@ struct watchdog_info {
 #define	WDIOC_SETPRETIMEOUT	_IOWR(WATCHDOG_IOCTL_BASE, 8, int)
 #define	WDIOC_GETPRETIMEOUT	_IOR(WATCHDOG_IOCTL_BASE, 9, int)
 #define	WDIOC_GETTIMELEFT	_IOR(WATCHDOG_IOCTL_BASE, 10, int)
+#define	WDIOC_SETACTION		_IOWR(WATCHDOG_IOCTL_BASE, 11, int)
+#define	WDIOC_GETACTION		_IOR(WATCHDOG_IOCTL_BASE, 12, int)
+#define	WDIOC_SETPREACTION	_IOWR(WATCHDOG_IOCTL_BASE, 13, int)
+#define	WDIOC_GETPREACTION	_IOR(WATCHDOG_IOCTL_BASE, 14, int)
 
 #define	WDIOF_UNKNOWN		-1	/* Unknown flag error */
 #define	WDIOS_UNKNOWN		-1	/* Unknown status error */
@@ -54,5 +58,15 @@ struct watchdog_info {
 #define	WDIOS_ENABLECARD	0x0002	/* Turn on the watchdog timer */
 #define	WDIOS_TEMPPANIC		0x0004	/* Kernel panic on temperature trip */
 
+/* Actions for WDIOC_xxxACTION ioctls. */
+#define WDIOA_RESET		0	/* Reset the system. */
+#define WDIOA_POWER_OFF		1	/* Power off the system. */
+#define WDIOA_POWER_CYCLE	2	/* Power cycle the system. */
+
+/* Actions for WDIOC_xxxPREACTION ioctls. */
+#define WDIOP_NONE		0	/* Do nothing. */
+#define WDIOP_NMI		1	/* Issue an NMI. */
+#define WDIOP_SMI		2	/* Issue a system management irq. */
+#define WDIOP_INTERRUPT		3	/* Issue a normal irq. */
 
 #endif /* _UAPI_LINUX_WATCHDOG_H */

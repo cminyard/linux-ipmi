@@ -53,6 +53,8 @@ struct watchdog_ops {
 	unsigned int (*get_timeleft)(struct watchdog_device *);
 	int (*restart)(struct watchdog_device *, unsigned long, void *);
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
+	int (*set_action)(struct watchdog_device *wdd, unsigned int val);
+	int (*set_preaction)(struct watchdog_device *wdd, unsigned int val);
 };
 
 /** struct watchdog_device - The structure that defines a watchdog device
@@ -101,6 +103,8 @@ struct watchdog_device {
 	unsigned int bootstatus;
 	unsigned int timeout;
 	unsigned int pretimeout;
+	unsigned int action;
+	unsigned int preaction;
 	unsigned int min_timeout;
 	unsigned int max_timeout;
 	unsigned int min_hw_heartbeat_ms;

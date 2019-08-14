@@ -112,6 +112,24 @@ current timeout using the GETTIMEOUT ioctl::
     ioctl(fd, WDIOC_GETTIMEOUT, &timeout);
     printf("The timeout was is %d seconds\n", timeout);
 
+Actions
+=======
+
+Some watchdog timers can perform different actions when they time out.
+Most will only reset.  The values are::
+
+    WDIOA_RESET - Reset the system
+    WDIOA_POWER_OFF - Power off the system
+    WDIOA_POWER_CYCLE - Power off the system then power it back on
+
+The value can be set::
+
+    ioctl(fd, WDIOC_SETACTION, &action);
+
+and queried::
+
+    ioctl(fd, WDIOC_GETACTION, &action);
+
 Pretimeouts
 ===========
 
@@ -136,6 +154,28 @@ There is also a get function for getting the pretimeout::
     printf("The pretimeout was is %d seconds\n", timeout);
 
 Not all watchdog drivers will support a pretimeout.
+
+Preactions
+==========
+
+Like actions some watchdog timers can perform different actions when
+they pretimeout.  The values are::
+
+    WDIOP_NONE - Don't do anything on a pretimeout
+    WDIOP_NMI - Issue an NMI
+    WDIOP_SMI - Issue a system management interrupt
+    WDIOP_INTERRUPT - Issue a normal interrupt
+
+The value can be set::
+
+    ioctl(fd, WDIOC_SETPREACTION, &preaction);
+
+and queried::
+
+    ioctl(fd, WDIOC_GETPREACTION, &preaction);
+
+Note that the pretimeout governor that reads data is not compatible with
+the NMI preaction.  The NMI preaction can only do nothing or panic.
 
 Get the number of seconds before reboot
 =======================================

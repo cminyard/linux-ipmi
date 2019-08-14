@@ -424,6 +424,48 @@ static int watchdog_set_pretimeout(struct watchdog_device *wdd,
 }
 
 /*
+ *	watchdog_set_action: set the action the watchdog performs.
+ *	@wdd: the watchdog device to set the timeout for
+ *	@action: The action, one of WDIOA_xxx
+ *
+ *	The caller must hold wd_data->lock.
+ */
+
+static int watchdog_set_action(struct watchdog_device *wdd,
+			       unsigned int action)
+{
+	int err = 0;
+
+	if (wdd->ops->set_action)
+		err = wdd->ops->set_action(wdd, action);
+	else if (action != WDIOA_RESET)
+		err = -EINVAL;
+
+	return err;
+}
+
+/*
+ *	watchdog_set_preaction: set the action the watchdog pretimeout performs.
+ *	@wdd: the watchdog device to set the timeout for
+ *	@action: The action, one of WDIOP_xxx
+ *
+ *	The caller must hold wd_data->lock.
+ */
+
+static int watchdog_set_preaction(struct watchdog_device *wdd,
+				  unsigned int action)
+{
+	int err;
+
+	if (wdd->ops->set_preaction)
+		err = wdd->ops->set_preaction(wdd, action);
+	else
+		err = -EOPNOTSUPP;
+
+	return err;
+}
+
+/*
  *	watchdog_get_timeleft: wrapper to get the time left before a reboot
  *	@wdd: the watchdog device to get the remaining time from
  *	@timeleft: the time that's left
@@ -516,6 +558,24 @@ static ssize_t pretimeout_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(pretimeout);
 
+static ssize_t action_show(struct device *dev,
+			   struct device_attribute *attr, char *buf)
+{
+	struct watchdog_device *wdd = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%u\n", wdd->action);
+}
+static DEVICE_ATTR_RO(action);
+
+static ssize_t preaction_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct watchdog_device *wdd = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%u\n", wdd->preaction);
+}
+static DEVICE_ATTR_RO(preaction);
+
 static ssize_t identity_show(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
@@ -592,6 +652,8 @@ static struct attribute *wdt_attrs[] = {
 	&dev_attr_identity.attr,
 	&dev_attr_timeout.attr,
 	&dev_attr_pretimeout.attr,
+	&dev_attr_action.attr,
+	&dev_attr_preaction.attr,
 	&dev_attr_timeleft.attr,
 	&dev_attr_bootstatus.attr,
 	&dev_attr_status.attr,
@@ -783,6 +845,26 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case WDIOC_GETPRETIMEOUT:
 		err = put_user(wdd->pretimeout, p);
+		break;
+	case WDIOC_SETACTION:
+		if (get_user(val, p)) {
+			err = -EFAULT;
+			break;
+		}
+		err = watchdog_set_action(wdd, val);
+		break;
+	case WDIOC_GETACTION:
+		err = put_user(wdd->action, p);
+		break;
+	case WDIOC_SETPREACTION:
+		if (get_user(val, p)) {
+			err = -EFAULT;
+			break;
+		}
+		err = watchdog_set_preaction(wdd, val);
+		break;
+	case WDIOC_GETPREACTION:
+		err = put_user(wdd->preaction, p);
 		break;
 	default:
 		err = -ENOTTY;
