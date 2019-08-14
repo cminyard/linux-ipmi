@@ -960,6 +960,12 @@ config STPMIC1_WATCHDOG
 	  To compile this driver as a module, choose M here: the
 	  module will be called spmic1_wdt.
 
+config IPMI_WATCHDOG
+       tristate 'IPMI Watchdog Timer'
+       depends on IPMI_HANDLER
+       help
+         This enables the IPMI watchdog timer.
+
 config UNIPHIER_WATCHDOG
 	tristate "UniPhier watchdog support"
 	depends on ARCH_UNIPHIER || COMPILE_TEST
