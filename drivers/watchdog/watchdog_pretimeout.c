@@ -95,6 +95,7 @@ int watchdog_pretimeout_governor_set(struct watchdog_device *wdd,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(watchdog_pretimeout_governor_set);
 
 void watchdog_notify_pretimeout(struct watchdog_device *wdd)
 {
