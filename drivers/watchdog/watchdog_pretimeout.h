@@ -2,7 +2,7 @@
 #ifndef __WATCHDOG_PRETIMEOUT_H
 #define __WATCHDOG_PRETIMEOUT_H
 
-#define WATCHDOG_GOV_NAME_MAXLEN	20
+#include <uapi/linux/watchdog.h>
 
 struct watchdog_device;
 

@@ -762,6 +762,7 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 	int __user *p = argp;
 	unsigned int val;
 	int err;
+	char gov[WATCHDOG_GOV_NAME_MAXLEN];
 
 	mutex_lock(&wd_data->lock);
 
@@ -865,6 +866,19 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case WDIOC_GETPREACTION:
 		err = put_user(wdd->preaction, p);
+		break;
+	case WDIOC_SETPREGOV:
+		err = strncpy_from_user(gov, (char *) argp, sizeof(gov));
+		if (err >= 0)
+			err = watchdog_pretimeout_governor_set(wdd, gov);
+		break;
+	case WDIOC_GETPREGOV:
+		err = 0;
+		val = watchdog_pretimeout_governor_get(wdd, gov);
+		if (val == 0)
+			err = -ENOENT;
+		if (copy_to_user(argp, gov, val + 1))
+			err = -EFAULT;
 		break;
 	default:
 		err = -ENOTTY;

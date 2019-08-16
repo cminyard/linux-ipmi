@@ -177,6 +177,37 @@ and queried::
 Note that the pretimeout governor that reads data is not compatible with
 the NMI preaction.  The NMI preaction can only do nothing or panic.
 
+Pretimeout Governors
+====================
+
+When a pretimeout occurs and the pretimeout framework is compiled in
+to the kernel, the pretimeout framework will generally be called.
+(The exception is that NMI pretimeouts do not call the pretimeout
+framework because they need special handling.)  Several pretimeout
+governers can be registered::
+
+    noop - Don't do anything on a pretimeout
+    panic - Issue a panic when a pretimeout occurs.  This is generally the
+            default
+    read_data - Provide one byte of data on the read interface to the
+                watchdog timer.  This way a userland program can handle
+		the pretimeout.
+
+If the CONFING_WATCHDOG_SYSFS is enabled, the pretimeout governor can
+be set by writing the value to the
+/sys/class/watchdog/watchdog<n>/pretimeout_governor sysfs file.
+
+The pretimeout governor can also be set through the ioctl interface with::
+
+    char governor[WATCHDOG_GOV_NAME_MAXLEN] = "panic";
+    ioctl(fd, WDIOC_SETPREGOV, gov);
+
+and can be queried with::
+
+    char governor[WATCHDOG_GOV_NAME_MAXLEN];
+    ioctl(fd, WDIOC_GETPREGOV, gov);
+    printf("The governor is %s\n", gov);
+
 Get the number of seconds before reboot
 =======================================
 
