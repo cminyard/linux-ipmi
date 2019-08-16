@@ -228,6 +228,9 @@ static struct watchdog_device hpwdt_dev = {
 	.timeout	= DEFAULT_MARGIN,
 	.pretimeout	= PRETIMEOUT_SEC,
 	.max_hw_heartbeat_ms	= HPWDT_MAX_TIMER * 1000,
+#ifdef CONFIG_HPWDT_NMI_DECODING
+	.preaction	= WDIOP_NMI,
+#endif
 };
 
 

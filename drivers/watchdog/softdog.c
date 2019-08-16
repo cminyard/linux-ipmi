@@ -125,6 +125,7 @@ static struct watchdog_device softdog_dev = {
 	.min_timeout = 1,
 	.max_timeout = 65535,
 	.timeout = TIMER_MARGIN,
+	.preaction = WDIOP_INTERRUPT,
 };
 
 static int __init softdog_init(void)

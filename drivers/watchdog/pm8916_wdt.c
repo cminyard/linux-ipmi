@@ -184,6 +184,7 @@ static int pm8916_wdt_probe(struct platform_device *pdev)
 	wdt->wdev.max_timeout = PM8916_WDT_MAX_TIMEOUT;
 	wdt->wdev.timeout = PM8916_WDT_DEFAULT_TIMEOUT;
 	wdt->wdev.pretimeout = 0;
+	wdt->wdev.preaction = WDIOP_INTERRUPT;
 	watchdog_set_drvdata(&wdt->wdev, wdt);
 
 	watchdog_init_timeout(&wdt->wdev, 0, dev);

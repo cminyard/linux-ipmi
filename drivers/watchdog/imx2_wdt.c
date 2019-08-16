@@ -280,6 +280,7 @@ static int __init imx2_wdt_probe(struct platform_device *pdev)
 	wdog->min_timeout	= 1;
 	wdog->timeout		= IMX2_WDT_DEFAULT_TIME;
 	wdog->max_hw_heartbeat_ms = IMX2_WDT_MAX_TIME * 1000;
+	wdog->preaction		= WDIOP_INTERRUPT;
 	wdog->parent		= &pdev->dev;
 
 	ret = platform_get_irq(pdev, 0);

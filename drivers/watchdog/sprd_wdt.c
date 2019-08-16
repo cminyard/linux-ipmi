@@ -302,6 +302,7 @@ static int sprd_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.min_timeout = SPRD_WDT_MIN_TIMEOUT;
 	wdt->wdd.max_timeout = SPRD_WDT_MAX_TIMEOUT;
 	wdt->wdd.timeout = SPRD_WDT_MAX_TIMEOUT;
+	wdt->wdd.preaction = WDIOP_INTERRUPT;
 
 	ret = sprd_wdt_enable(wdt);
 	if (ret) {
