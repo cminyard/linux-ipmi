@@ -55,7 +55,9 @@ struct watchdog_ops {
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
 };
 
-/** struct watchdog_device - The structure that defines a watchdog device
+/** struct watchdog_device - The structure that defines a watchdog device.
+ * Unless otherwise specified, all timeouts are in seconds unless
+ * WDIOF_MSECTIMER is set, then they are in milliseconds.
  *
  * @id:		The watchdog's ID. (Allocated by watchdog_register_device)
  * @parent:	The parent bus device
@@ -65,10 +67,10 @@ struct watchdog_ops {
  * @ops:	Pointer to the list of watchdog operations.
  * @gov:	Pointer to watchdog pretimeout governor.
  * @bootstatus:	Status of the watchdog device at boot.
- * @timeout:	The watchdog devices timeout value (in seconds).
+ * @timeout:	The watchdog devices timeout value.
  * @pretimeout: The watchdog devices pre_timeout value.
- * @min_timeout:The watchdog devices minimum timeout value (in seconds).
- * @max_timeout:The watchdog devices maximum timeout value (in seconds)
+ * @min_timeout:The watchdog devices minimum timeout value.
+ * @max_timeout:The watchdog devices maximum timeout value
  *		as configurable from user space. Only relevant if
  *		max_hw_heartbeat_ms is not provided.
  * @min_hw_heartbeat_ms:
@@ -156,6 +158,17 @@ static inline void watchdog_stop_on_unregister(struct watchdog_device *wdd)
 	set_bit(WDOG_STOP_ON_UNREGISTER, &wdd->status);
 }
 
+/*
+ * Use the following function to check if a timeout value is
+ * internally consistent with the range parameters.  t is in milliseconds.
+ */
+static inline bool _watchdog_timeout_invalid(struct watchdog_device *wdd, unsigned int t)
+{
+	return  t < wdd->min_timeout ||
+		(!wdd->max_hw_heartbeat_ms && wdd->max_timeout &&
+		 t > wdd->max_timeout);
+}
+
 /* Use the following function to check if a timeout value is invalid */
 static inline bool watchdog_timeout_invalid(struct watchdog_device *wdd, unsigned int t)
 {
@@ -170,9 +183,11 @@ static inline bool watchdog_timeout_invalid(struct watchdog_device *wdd, unsigne
 	 *   is configured, and the requested value is larger than the
 	 *   configured maximum timeout.
 	 */
-	return t > UINT_MAX / 1000 || t < wdd->min_timeout ||
-		(!wdd->max_hw_heartbeat_ms && wdd->max_timeout &&
-		 t > wdd->max_timeout);
+	if (t > UINT_MAX / 1000)
+		return true;
+	if (wdd->info->options & WDIOF_MSECTIMER)
+		t *= 1000;
+	return _watchdog_timeout_invalid(wdd, t);
 }
 
 /* Use the following function to check if a pretimeout value is invalid */

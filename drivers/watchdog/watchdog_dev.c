@@ -99,7 +99,11 @@ static inline bool watchdog_need_worker(struct watchdog_device *wdd)
 {
 	/* All variables in milli-seconds */
 	unsigned int hm = wdd->max_hw_heartbeat_ms;
-	unsigned int t = wdd->timeout * 1000;
+	unsigned int t = wdd->timeout;
+
+	if (!(wdd->info->options & WDIOF_MSECTIMER))
+		/* Convert to msecs if not already so. */
+		t *= 1000;
 
 	/*
 	 * A worker to generate heartbeat requests is needed if all of the
@@ -121,11 +125,15 @@ static inline bool watchdog_need_worker(struct watchdog_device *wdd)
 static ktime_t watchdog_next_keepalive(struct watchdog_device *wdd)
 {
 	struct watchdog_core_data *wd_data = wdd->wd_data;
-	unsigned int timeout_ms = wdd->timeout * 1000;
+	unsigned int timeout_ms = wdd->timeout;
 	ktime_t keepalive_interval;
 	ktime_t last_heartbeat, latest_heartbeat;
 	ktime_t virt_timeout;
 	unsigned int hw_heartbeat_ms;
+
+	if (!(wdd->info->options & WDIOF_MSECTIMER))
+		/* Convert to msecs if not already so. */
+		timeout_ms *= 1000;
 
 	if (watchdog_active(wdd))
 		virt_timeout = ktime_add(wd_data->last_keepalive,
@@ -137,7 +145,7 @@ static ktime_t watchdog_next_keepalive(struct watchdog_device *wdd)
 	keepalive_interval = ms_to_ktime(hw_heartbeat_ms / 2);
 
 	/*
-	 * To ensure that the watchdog times out wdd->timeout seconds
+	 * To ensure that the watchdog times out wdd->timeout seconds/msecs
 	 * after the most recent ping from userspace, the last
 	 * worker ping has to come in hw_heartbeat_ms before this timeout.
 	 */
@@ -382,6 +390,8 @@ static int watchdog_set_timeout(struct watchdog_device *wdd,
 	if (watchdog_timeout_invalid(wdd, timeout))
 		return -EINVAL;
 
+	if (wdd->info->options & WDIOF_MSECTIMER)
+		timeout *= 1000;
 	if (wdd->ops->set_timeout) {
 		err = wdd->ops->set_timeout(wdd, timeout);
 	} else {
@@ -413,6 +423,8 @@ static int watchdog_set_pretimeout(struct watchdog_device *wdd,
 	if (watchdog_pretimeout_invalid(wdd, timeout))
 		return -EINVAL;
 
+	if (wdd->info->options & WDIOF_MSECTIMER)
+		timeout *= 1000;
 	if (wdd->ops->set_pretimeout)
 		err = wdd->ops->set_pretimeout(wdd, timeout);
 	else
@@ -440,6 +452,8 @@ static int watchdog_get_timeleft(struct watchdog_device *wdd,
 		return -EOPNOTSUPP;
 
 	*timeleft = wdd->ops->get_timeleft(wdd);
+	if (wdd->info->options & WDIOF_MSECTIMER)
+		*timeleft /= 1000;
 
 	return 0;
 }
@@ -508,8 +522,11 @@ static ssize_t timeleft_show(struct device *dev, struct device_attribute *attr,
 	mutex_lock(&wd_data->lock);
 	status = watchdog_get_timeleft(wdd, &val);
 	mutex_unlock(&wd_data->lock);
-	if (!status)
+	if (!status) {
+		if (wdd->info->options & WDIOF_MSECTIMER)
+			val /= 1000;
 		status = sprintf(buf, "%u\n", val);
+	}
 
 	return status;
 }
@@ -519,8 +536,12 @@ static ssize_t timeout_show(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
+	unsigned int t = wdd->timeout;
 
-	return sprintf(buf, "%u\n", wdd->timeout);
+	if (wdd->info->options & WDIOF_MSECTIMER)
+		t /= 1000;
+
+	return sprintf(buf, "%u\n", t);
 }
 static DEVICE_ATTR_RO(timeout);
 
@@ -528,8 +549,12 @@ static ssize_t pretimeout_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
+	unsigned int t = wdd->pretimeout;
 
-	return sprintf(buf, "%u\n", wdd->pretimeout);
+	if (wdd->info->options & WDIOF_MSECTIMER)
+		t /= 1000;
+
+	return sprintf(buf, "%u\n", t);
 }
 static DEVICE_ATTR_RO(pretimeout);
 
@@ -783,7 +808,10 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 			err = -EOPNOTSUPP;
 			break;
 		}
-		err = put_user(wdd->timeout, p);
+		val = wdd->timeout;
+		if (wdd->info->options & WDIOF_MSECTIMER)
+			val /= 1000;
+		err = put_user(val, p);
 		break;
 	case WDIOC_GETTIMELEFT:
 		err = watchdog_get_timeleft(wdd, &val);
@@ -799,7 +827,10 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 		err = watchdog_set_pretimeout(wdd, val);
 		break;
 	case WDIOC_GETPRETIMEOUT:
-		err = put_user(wdd->pretimeout, p);
+		val = wdd->pretimeout;
+		if (wdd->info->options & WDIOF_MSECTIMER)
+			val /= 1000;
+		err = put_user(val, p);
 		break;
 	default:
 		err = -ENOTTY;

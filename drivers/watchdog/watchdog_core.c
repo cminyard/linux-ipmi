@@ -116,17 +116,17 @@ int watchdog_init_timeout(struct watchdog_device *wdd,
 {
 	const char *dev_str = wdd->parent ? dev_name(wdd->parent) :
 			      (const char *)wdd->info->identity;
-	unsigned int t = 0;
 	int ret = 0;
 
 	watchdog_check_min_max_timeout(wdd);
 
 	/* check the driver supplied value (likely a module parameter) first */
 	if (timeout_parm) {
-		if (!watchdog_timeout_invalid(wdd, timeout_parm)) {
-			wdd->timeout = timeout_parm;
-			return 0;
-		}
+		if (wdd->info->options & WDIOF_MSECTIMER) {
+			if (!_watchdog_timeout_invalid(wdd, timeout_parm))
+				goto set_timeout;
+		} else if (!watchdog_timeout_invalid(wdd, timeout_parm))
+			goto set_timeout;
 		pr_err("%s: driver supplied timeout (%u) out of range\n",
 			dev_str, timeout_parm);
 		ret = -EINVAL;
@@ -134,12 +134,18 @@ int watchdog_init_timeout(struct watchdog_device *wdd,
 
 	/* try to get the timeout_sec property */
 	if (dev && dev->of_node &&
-	    of_property_read_u32(dev->of_node, "timeout-sec", &t) == 0) {
-		if (t && !watchdog_timeout_invalid(wdd, t)) {
-			wdd->timeout = t;
-			return 0;
+	    of_property_read_u32(dev->of_node, "timeout-sec",
+				 &timeout_parm) == 0) {
+		if (timeout_parm &&
+		    !watchdog_timeout_invalid(wdd, timeout_parm)) {
+			if (!(wdd->info->options & WDIOF_MSECTIMER))
+				/* Convert to msecs if not already so. */
+				timeout_parm *= 1000;
+			goto set_timeout;
 		}
-		pr_err("%s: DT supplied timeout (%u) out of range\n", dev_str, t);
+
+		pr_err("%s: DT supplied timeout (%u) out of range\n", dev_str,
+		       timeout_parm);
 		ret = -EINVAL;
 	}
 
@@ -148,6 +154,10 @@ int watchdog_init_timeout(struct watchdog_device *wdd,
 			wdd->timeout);
 
 	return ret;
+
+set_timeout:
+	wdd->timeout = timeout_parm;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(watchdog_init_timeout);
 
