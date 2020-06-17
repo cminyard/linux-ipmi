@@ -372,6 +372,56 @@ static unsigned int watchdog_get_status(struct watchdog_device *wdd)
 }
 
 /*
+ *	watchdog_timeout_tointernal: Convert to internal time representation
+ *	@wdd: the watchdog device
+ *	@in_msecs: false - timeout in seconds, true - timeout in milliseconds
+ *	@timeout: timeout to convert
+ *
+ *	Convert from an external representation of the timeout in
+ *	seconds (or milliseconds if in_msecs is true) to the internal
+ *	timeout in seconds or milliseconds, depending on
+ *	WDIOF_MSECTIMER.
+ */
+unsigned int watchdog_timeout_tointernal(struct watchdog_device *wdd,
+					 bool in_msecs,
+					 unsigned int timeout)
+{
+	if (wdd->info->options & WDIOF_MSECTIMER) {
+		if (!in_msecs)
+			timeout *= 1000;
+	} else if (in_msecs) {
+		/* Truncate up. */
+		timeout = (timeout + 999) / 1000;
+	}
+	return timeout;
+}
+
+/*
+ *	watchdog_timeout_toexternal: Convert to external time representation
+ *	@wdd: the watchdog device
+ *	@in_msecs: false - returns seconds, true - returns milliseconds
+ *	@timeout: timeout in seconds (or milliseconds if WDIOF_MSECTIMER is set)
+ *
+ *	Convert from an internal representation of the timeout in
+ *	seconds (or milliseconds if WDIOF_MSECTIMER is set) to the
+ *	external timeout in seconds or milliseconds, depending on
+ *	in_msecs.
+ */
+static unsigned int watchdog_timeout_toexternal(struct watchdog_device *wdd,
+						bool in_msecs,
+						unsigned int timeout)
+{
+	if (wdd->info->options & WDIOF_MSECTIMER) {
+		if (!in_msecs)
+			timeout /= 1000;
+	} else if (in_msecs) {
+		timeout *= 1000;
+	}
+
+	return timeout;
+}
+
+/*
  *	watchdog_set_timeout: set the watchdog timer timeout
  *	@wdd: the watchdog device to set the timeout for
  *	@timeout: timeout to set in seconds
@@ -379,7 +429,7 @@ static unsigned int watchdog_get_status(struct watchdog_device *wdd)
  *	The caller must hold wd_data->lock.
  */
 
-static int watchdog_set_timeout(struct watchdog_device *wdd,
+static int watchdog_set_timeout(struct watchdog_device *wdd, bool in_msecs,
 							unsigned int timeout)
 {
 	int err = 0;
@@ -387,11 +437,13 @@ static int watchdog_set_timeout(struct watchdog_device *wdd,
 	if (!(wdd->info->options & WDIOF_SETTIMEOUT))
 		return -EOPNOTSUPP;
 
-	if (watchdog_timeout_invalid(wdd, timeout))
+	if (in_msecs) {
+		if (_watchdog_timeout_invalid(wdd, timeout))
+			return -EINVAL;
+	} else if (watchdog_timeout_invalid(wdd, timeout))
 		return -EINVAL;
 
-	if (wdd->info->options & WDIOF_MSECTIMER)
-		timeout *= 1000;
+	timeout = watchdog_timeout_tointernal(wdd, in_msecs, timeout);
 	if (wdd->ops->set_timeout) {
 		err = wdd->ops->set_timeout(wdd, timeout);
 	} else {
@@ -413,6 +465,7 @@ static int watchdog_set_timeout(struct watchdog_device *wdd,
  */
 
 static int watchdog_set_pretimeout(struct watchdog_device *wdd,
+				   bool in_msecs,
 				   unsigned int timeout)
 {
 	int err = 0;
@@ -423,8 +476,7 @@ static int watchdog_set_pretimeout(struct watchdog_device *wdd,
 	if (watchdog_pretimeout_invalid(wdd, timeout))
 		return -EINVAL;
 
-	if (wdd->info->options & WDIOF_MSECTIMER)
-		timeout *= 1000;
+	timeout = watchdog_timeout_tointernal(wdd, in_msecs, timeout);
 	if (wdd->ops->set_pretimeout)
 		err = wdd->ops->set_pretimeout(wdd, timeout);
 	else
@@ -443,7 +495,7 @@ static int watchdog_set_pretimeout(struct watchdog_device *wdd,
  *	Get the time before a watchdog will reboot (if not pinged).
  */
 
-static int watchdog_get_timeleft(struct watchdog_device *wdd,
+static int watchdog_get_timeleft(struct watchdog_device *wdd, bool in_msecs,
 							unsigned int *timeleft)
 {
 	*timeleft = 0;
@@ -452,8 +504,7 @@ static int watchdog_get_timeleft(struct watchdog_device *wdd,
 		return -EOPNOTSUPP;
 
 	*timeleft = wdd->ops->get_timeleft(wdd);
-	if (wdd->info->options & WDIOF_MSECTIMER)
-		*timeleft /= 1000;
+	*timeleft = watchdog_timeout_toexternal(wdd, in_msecs, *timeleft);
 
 	return 0;
 }
@@ -520,13 +571,11 @@ static ssize_t timeleft_show(struct device *dev, struct device_attribute *attr,
 	unsigned int val;
 
 	mutex_lock(&wd_data->lock);
-	status = watchdog_get_timeleft(wdd, &val);
+	status = watchdog_get_timeleft(wdd, false, &val);
 	mutex_unlock(&wd_data->lock);
-	if (!status) {
-		if (wdd->info->options & WDIOF_MSECTIMER)
-			val /= 1000;
-		status = sprintf(buf, "%u\n", val);
-	}
+	if (!status)
+		status = sprintf(buf, "%u\n",
+				 watchdog_timeout_toexternal(wdd, false, val));
 
 	return status;
 }
@@ -536,12 +585,9 @@ static ssize_t timeout_show(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
-	unsigned int t = wdd->timeout;
 
-	if (wdd->info->options & WDIOF_MSECTIMER)
-		t /= 1000;
-
-	return sprintf(buf, "%u\n", t);
+	return sprintf(buf, "%u\n",
+		       watchdog_timeout_toexternal(wdd, false, wdd->timeout));
 }
 static DEVICE_ATTR_RO(timeout);
 
@@ -549,12 +595,10 @@ static ssize_t pretimeout_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
-	unsigned int t = wdd->pretimeout;
 
-	if (wdd->info->options & WDIOF_MSECTIMER)
-		t /= 1000;
-
-	return sprintf(buf, "%u\n", t);
+	return sprintf(buf, "%u\n",
+		       watchdog_timeout_toexternal(wdd, false,
+						   wdd->pretimeout));
 }
 static DEVICE_ATTR_RO(pretimeout);
 
@@ -788,11 +832,13 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 		err = watchdog_ping(wdd);
 		break;
 	case WDIOC_SETTIMEOUT:
+	case WDIOC_SETTIMEOUT_MS:
 		if (get_user(val, p)) {
 			err = -EFAULT;
 			break;
 		}
-		err = watchdog_set_timeout(wdd, val);
+		err = watchdog_set_timeout(wdd, cmd == WDIOC_SETTIMEOUT_MS,
+					   val);
 		if (err < 0)
 			break;
 		/* If the watchdog is active then we send a keepalive ping
@@ -803,33 +849,42 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 			break;
 		/* fall through */
 	case WDIOC_GETTIMEOUT:
+	case WDIOC_GETTIMEOUT_MS:
 		/* timeout == 0 means that we don't know the timeout */
 		if (wdd->timeout == 0) {
 			err = -EOPNOTSUPP;
 			break;
 		}
-		val = wdd->timeout;
-		if (wdd->info->options & WDIOF_MSECTIMER)
-			val /= 1000;
+		val = watchdog_timeout_toexternal(wdd,
+					  (cmd == WDIOC_SETTIMEOUT_MS ||
+					   cmd == WDIOC_GETTIMEOUT_MS),
+					  wdd->timeout);
 		err = put_user(val, p);
 		break;
 	case WDIOC_GETTIMELEFT:
-		err = watchdog_get_timeleft(wdd, &val);
+	case WDIOC_GETTIMELEFT_MS:
+		err = watchdog_get_timeleft(wdd, cmd == WDIOC_GETTIMELEFT_MS,
+					    &val);
 		if (err < 0)
 			break;
 		err = put_user(val, p);
 		break;
 	case WDIOC_SETPRETIMEOUT:
+	case WDIOC_SETPRETIMEOUT_MS:
 		if (get_user(val, p)) {
 			err = -EFAULT;
 			break;
 		}
-		err = watchdog_set_pretimeout(wdd, val);
+		err = watchdog_set_pretimeout(wdd,
+					      cmd == WDIOC_SETPRETIMEOUT_MS,
+					      val);
 		break;
 	case WDIOC_GETPRETIMEOUT:
-		val = wdd->pretimeout;
-		if (wdd->info->options & WDIOF_MSECTIMER)
-			val /= 1000;
+	case WDIOC_GETPRETIMEOUT_MS:
+		val = watchdog_timeout_toexternal(wdd,
+					  (cmd == WDIOC_SETPRETIMEOUT_MS ||
+					   cmd == WDIOC_GETPRETIMEOUT_MS),
+					  wdd->pretimeout);
 		err = put_user(val, p);
 		break;
 	default:

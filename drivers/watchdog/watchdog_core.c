@@ -138,9 +138,8 @@ int watchdog_init_timeout(struct watchdog_device *wdd,
 				 &timeout_parm) == 0) {
 		if (timeout_parm &&
 		    !watchdog_timeout_invalid(wdd, timeout_parm)) {
-			if (!(wdd->info->options & WDIOF_MSECTIMER))
-				/* Convert to msecs if not already so. */
-				timeout_parm *= 1000;
+			timeout_parm = watchdog_timeout_tointernal(wdd, false,
+							timeout_parm);
 			goto set_timeout;
 		}
 

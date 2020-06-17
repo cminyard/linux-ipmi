@@ -31,3 +31,5 @@ extern int watchdog_dev_register(struct watchdog_device *);
 extern void watchdog_dev_unregister(struct watchdog_device *);
 extern int __init watchdog_dev_init(void);
 extern void __exit watchdog_dev_exit(void);
+extern unsigned int watchdog_timeout_tointernal(struct watchdog_device *,
+						bool, unsigned int);
