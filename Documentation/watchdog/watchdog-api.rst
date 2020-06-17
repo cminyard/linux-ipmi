@@ -112,6 +112,39 @@ current timeout using the GETTIMEOUT ioctl::
     ioctl(fd, WDIOC_GETTIMEOUT, &timeout);
     printf("The timeout was is %d seconds\n", timeout);
 
+There is also millisecond-level ioctls for setting timeouts in
+millisecond values.  These will work against a watchdog driver that
+only supports seconds, but values will be truncated up on setting and
+truncated on fetching.  So, for instance:
+
+    int timeout = 44001;
+    ioctl(fd, WDIOC_SETTIMEOUT_MS, &timeout);
+    printf("The timeout was set to %d milliseconds\n", timeout);
+
+If the driver only supports seconds, the timeout will be set to 45
+seconds because it's truncated up.
+
+Fetching does similar conversions.  On a driver that supports
+milliseconds, if the current value is 39603 milliseconds:
+
+    ioctl(fd, WDIOC_GETTIMEOUT, &timeout);
+    printf("The timeout was is %d seconds\n", timeout);
+    ioctl(fd, WDIOC_GETTIMEOUT_MS, &timeout);
+    printf("The timeout was is %d milliseconds\n", timeout);
+
+will print 39 seconds and 39603 milliseconds.
+
+If a driver supports millisecond level precision, it will have the
+WDIOF_MSECTIMER flag set in its option field.  Note that does not mean
+that the driver has millisecond level accuracy.  For instance, a
+device might have a 10Hz clock, giving 100ms accuracy.  The driver
+should set the return timeout for WDIOC_SETTIMEOUT_MS to the actual
+setting of the timeout, so you can verify the value.
+
+It would be nice to have a granularity field, but some devices may not
+be linear.  So a granularity is not a general thing that could be
+done.
+
 Pretimeouts
 ===========
 
@@ -137,6 +170,16 @@ There is also a get function for getting the pretimeout::
 
 Not all watchdog drivers will support a pretimeout.
 
+Like timeouts, pretimeouts also have millisecond-level ioctls:
+
+    pretimeout = 10000;
+    ioctl(fd, WDIOC_SETPRETIMEOUT_MS, &pretimeout);
+    ioctl(fd, WDIOC_GETPRETIMEOUT_NS, &pretimeout);
+    printf("The pretimeout was is %d milliseconds\n", pretimeout);
+
+These work just like the timeouts, see that discussion for how
+conversions are done.
+
 Get the number of seconds before reboot
 =======================================
 
@@ -146,6 +189,14 @@ that returns the number of seconds before reboot::
 
     ioctl(fd, WDIOC_GETTIMELEFT, &timeleft);
     printf("The timeout was is %d seconds\n", timeleft);
+
+There is also a millisecond-level version:
+
+    ioctl(fd, WDIOC_GETTIMELEFT_MS, &timeleft);
+    printf("The timeout was is %d milliseconds\n", timeleft);
+
+If the driver only supports seconds, then the value returns is just
+1000 times the seconds value.
 
 Environmental monitoring
 ========================
@@ -222,6 +273,14 @@ sense.
 	===================	=====================
 
 The watchdog saw a keepalive ping since it was last queried.
+
+	===============		========================================
+	WDIOF_MSECTIMER		Driver can use milliseconds for timeouts
+	===============		========================================
+
+The driver can do millisecond-level timeouts.  The seconds-level
+interfaces still work, but setting values in milliseconds can result
+in finer granularity.
 
 	================	=======================
 	WDIOF_SETTIMEOUT	Can set/get the timeout

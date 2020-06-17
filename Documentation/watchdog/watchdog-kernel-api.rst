@@ -80,13 +80,13 @@ It contains following fields:
   additional information about the watchdog timer itself. (Like it's unique name)
 * ops: a pointer to the list of watchdog operations that the watchdog supports.
 * gov: a pointer to the assigned watchdog device pretimeout governor or NULL.
-* timeout: the watchdog timer's timeout value (in seconds).
+* timeout: the watchdog timer's timeout value.
   This is the time after which the system will reboot if user space does
   not send a heartbeat request if WDOG_ACTIVE is set.
-* pretimeout: the watchdog timer's pretimeout value (in seconds).
-* min_timeout: the watchdog timer's minimum timeout value (in seconds).
+* pretimeout: the watchdog timer's pretimeout value.
+* min_timeout: the watchdog timer's minimum timeout value.
   If set, the minimum configurable value for 'timeout'.
-* max_timeout: the watchdog timer's maximum timeout value (in seconds),
+* max_timeout: the watchdog timer's maximum timeout value,
   as seen from userspace. If set, the maximum configurable value for
   'timeout'. Not used if max_hw_heartbeat_ms is non-zero.
 * min_hw_heartbeat_ms: Hardware limit for minimum time between heartbeats,
@@ -96,7 +96,7 @@ It contains following fields:
   If set, the infrastructure will send heartbeats to the watchdog driver
   if 'timeout' is larger than max_hw_heartbeat_ms, unless WDOG_ACTIVE
   is set and userspace failed to send a heartbeat for at least 'timeout'
-  seconds. max_hw_heartbeat_ms must be set if a driver does not implement
+  time. max_hw_heartbeat_ms must be set if a driver does not implement
   the stop function.
 * reboot_nb: notifier block that is registered for reboot notifications, for
   internal use only. If the driver calls watchdog_stop_on_reboot, watchdog core
@@ -116,6 +116,13 @@ It contains following fields:
   running/active, or is the nowayout bit set).
 * deferred: entry in wtd_deferred_reg_list which is used to
   register early initialized watchdogs.
+
+The time value used to interact with the device can either be in
+seconds or milli-seconds except for min_hw_heartbeat_ms and
+max_hw_heartbeat_ms, which are always in milli-seconds. If the driver
+sets WDIOF_MSECTIMER in the driver info flags, then the time values
+will be in milli-seconds. If it is not set, then the time values will
+be in seconds.
 
 The list of watchdog operations is defined as::
 
@@ -212,12 +219,13 @@ they are supported. These optional routines/operations are:
   also take care of checking if pretimeout is still valid and set up the timer
   accordingly. This can't be done in the core without races, so it is the
   duty of the driver.
-* set_pretimeout: this routine checks and changes the pretimeout value of
-  the watchdog. It is optional because not all watchdogs support pretimeout
-  notification. The timeout value is not an absolute time, but the number of
-  seconds before the actual timeout would happen. It returns 0 on success,
-  -EINVAL for "parameter out of range" and -EIO for "could not write value to
-  the watchdog". A value of 0 disables pretimeout notification.
+* set_pretimeout: this routine checks and changes the pretimeout value
+  of the watchdog. It is optional because not all watchdogs support
+  pretimeout notification. The timeout value is not an absolute time,
+  but the time before the actual timeout would happen. It returns 0 on
+  success, -EINVAL for "parameter out of range" and -EIO for "could
+  not write value to the watchdog". A value of 0 disables pretimeout
+  notification.
 
   (Note: the WDIOF_PRETIMEOUT needs to be set in the options field of the
   watchdog's info structure).
