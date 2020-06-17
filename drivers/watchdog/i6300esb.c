@@ -69,12 +69,40 @@
 #define ESB_UNLOCK1     0x80            /* Step 1 to unlock reset registers  */
 #define ESB_UNLOCK2     0x86            /* Step 2 to unlock reset registers  */
 
-/* module parameters */
-/* 30 sec default heartbeat (1 < heartbeat < 2*1023) */
+/*
+ * Timer clock is driven by a 30ns clock divided by 32768, giving a
+ * 983.04usec clock.  Not really close enough to say it's 1Khz.  But
+ * if we multiply by 101725261 / 100000000, that would give us a
+ * 1000.0000057 usec per increment of time, which is very close and
+ * slightly slow, which is preferred to slightly fast.  If there is a
+ * remainder from that calculation, then round up.  So if 1 comes in
+ * for the time, we will have (1 * 101725261) / 100000000 = 1, and
+ * (1 * 101725261) % 100000000 = 1725261, so we round up the 1 to a 2, which
+ * will result in 1.96608msecs.  Remember, better too long than too short.
+ * All the arithmetic has to be 64 bit to avoid overflow.
+ *
+ * The error gets better as the numbers increase to more reasonable
+ * values.  For 30 seconds, for instance, we get a count of 30518,
+ * which is 30.0004 seconds.  Close enough :).
+ *
+ * The 2061582 max time comes in because we have 2 20 bit registers
+ * that count down.  This means that the maximum timeout value we can
+ * put in the registers is 0x1ffffe.  Run that through the calculation
+ * backwards and we get 0x1ffffe * 100000000 / 101725261 = 2061582.  If we
+ * put that into our calculation, we get 2061582 * 101725261 / 100000000 =
+ * 0x1ffffd which will round up to 0x1ffffe.
+ *
+ * These numbers should never result in an error more than 1ms, so
+ * there is no need to be more accurate.  This is been tested
+ * exhaustively.
+ */
 #define ESB_HEARTBEAT_MIN	1
-#define ESB_HEARTBEAT_MAX	2046
-#define ESB_HEARTBEAT_DEFAULT	30
-#define ESB_HEARTBEAT_RANGE __MODULE_STRING(ESB_HEARTBEAT_MIN) \
+#define ESB_HEARTBEAT_MAX	2061582
+/* 30 sec default heartbeat */
+#define ESB_HEARTBEAT_DEFAULT	30000
+
+/* module parameters */
+#define ESB_HEARTBEAT_RANGE __MODULE_STRING(ESB_HEARTBEAT_MIN)	\
 	"<heartbeat<" __MODULE_STRING(ESB_HEARTBEAT_MAX)
 static int heartbeat; /* in seconds */
 module_param(heartbeat, int, 0);
@@ -158,16 +186,33 @@ static int esb_timer_set_heartbeat(struct watchdog_device *wdd,
 {
 	struct esb_dev *edev = to_esb_dev(wdd);
 	u32 val;
+	u64 ttime, ctime;
 
-	/* We shift by 9, so if we are passed a value of 1 sec,
-	 * val will be 1 << 9 = 512, then write that to two
-	 * timers => 2 * 512 = 1024 (which is decremented at 1KHz)
+	/* See comments above ESB_HEARTBEAT_xxx for details on this. */
+	ttime = (u64) time * 101725261ULL;
+	ctime = div_u64(ttime, 100000000);
+	/*
+	 * You might think that a "if (ttime % 100000000ULL)" would be
+	 * required here so we don't round up if the time is exact,
+	 * but with these numbers, there is never a time value that
+	 * will come in that will result in a zero remainder.  So no
+	 * need to check.  We round up, as it's better to be a little
+	 * long than a little short.
 	 */
-	val = time << 9;
+	ctime += 1;
+
+	/*
+	 * We have two registers that have to count down, so each gets
+	 * loaded with half the time.
+	 */
+	val = ctime / 2;
 
 	/* Write timer 1 */
 	esb_unlock_registers(edev);
 	writel(val, ESB_TIMER1_REG(edev));
+
+	/* If the time was odd, add the extra tick to the second register. */
+	val += ctime % 2;
 
 	/* Write timer 2 */
 	esb_unlock_registers(edev);
@@ -190,7 +235,8 @@ static int esb_timer_set_heartbeat(struct watchdog_device *wdd,
 
 static struct watchdog_info esb_info = {
 	.identity = ESB_MODULE_NAME,
-	.options = WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE,
+	.options = (WDIOF_SETTIMEOUT | WDIOF_KEEPALIVEPING | WDIOF_MAGICCLOSE |
+		    WDIOF_MSECTIMER),
 };
 
 static const struct watchdog_ops esb_ops = {
