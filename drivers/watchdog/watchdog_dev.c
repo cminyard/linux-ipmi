@@ -699,6 +699,48 @@ static ssize_t watchdog_write(struct file *file, const char __user *data,
 }
 
 /*
+ *	watchdog_read: Pass a read on to the device if it accepts it
+ *	@file: file handle to the device
+ *	@buf: the buffer to read into
+ *	@count: the size of buf in bytes
+ *      @ppos: pointer to the file offset
+ *
+ *	The watchdog API defines a common set of functions for all watchdogs
+ *	according to their available features.
+ */
+
+static ssize_t watchdog_read(struct file *file, char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	struct watchdog_core_data *wd_data = file->private_data;
+	struct watchdog_device *wdd = wd_data->wdd;
+
+	if (!wdd->ops->read)
+		return -EINVAL;
+	return wdd->ops->read(wdd, file, buf, count, ppos);
+}
+
+static __poll_t watchdog_poll(struct file *file, poll_table *wait)
+{
+	struct watchdog_core_data *wd_data = file->private_data;
+	struct watchdog_device *wdd = wd_data->wdd;
+
+	if (!wdd->ops->poll)
+		return DEFAULT_POLLMASK;
+	return wdd->ops->poll(wdd, file, wait);
+}
+
+static int watchdog_fasync(int fd, struct file *file, int on)
+{
+	struct watchdog_core_data *wd_data = file->private_data;
+	struct watchdog_device *wdd = wd_data->wdd;
+
+	if (!wdd->ops->fasync)
+		return 0;
+	return wdd->ops->fasync(wdd, fd, file, on);
+}
+
+/*
  *	watchdog_ioctl: handle the different ioctl's for the watchdog device.
  *	@file: file handle to the device
  *	@cmd: watchdog command
@@ -951,6 +993,9 @@ done:
 static const struct file_operations watchdog_fops = {
 	.owner		= THIS_MODULE,
 	.write		= watchdog_write,
+	.read		= watchdog_read,
+	.poll		= watchdog_poll,
+	.fasync		= watchdog_fasync,
 	.unlocked_ioctl	= watchdog_ioctl,
 	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= watchdog_open,

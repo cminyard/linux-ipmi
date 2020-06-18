@@ -15,6 +15,7 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/notifier.h>
+#include <linux/poll.h>
 #include <uapi/linux/watchdog.h>
 
 struct watchdog_ops;
@@ -34,6 +35,9 @@ struct watchdog_governor;
  * @get_timeleft:The routine that gets the time left before a reset (in seconds).
  * @restart:	The routine for restarting the machine.
  * @ioctl:	The routines that handles extra ioctl calls.
+ * @read:	Call this is not NULL and a read comes in on the watchdog dev.
+ * @poll:	Call this is not NULL and a poll comes in on the watchdog dev.
+ * @fasync:	Call this is not NULL and a fasync comes in on the watchdog dev.
  *
  * The watchdog_ops structure contains a list of low-level operations
  * that control a watchdog device. It also contains the module that owns
@@ -53,6 +57,10 @@ struct watchdog_ops {
 	unsigned int (*get_timeleft)(struct watchdog_device *);
 	int (*restart)(struct watchdog_device *, unsigned long, void *);
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
+	ssize_t (*read)(struct watchdog_device *, struct file *, char __user *,
+			size_t, loff_t *);
+	__poll_t (*poll)(struct watchdog_device *, struct file *, poll_table *);
+	int (*fasync)(struct watchdog_device *, int, struct file *, int);
 };
 
 /** struct watchdog_device - The structure that defines a watchdog device
