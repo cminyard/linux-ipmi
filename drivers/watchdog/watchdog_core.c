@@ -165,6 +165,8 @@ static int watchdog_reboot_notifier(struct notifier_block *nb,
 			if (ret)
 				return NOTIFY_BAD;
 		}
+	} else if (wdd->reboot_timeout) {
+		watchdog_set_timeout(wdd, wdd->reboot_timeout);
 	}
 
 	return NOTIFY_DONE;

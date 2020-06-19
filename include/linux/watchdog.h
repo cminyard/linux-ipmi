@@ -92,6 +92,9 @@ struct watchdog_ops {
  * @status:	Field that contains the devices internal status bits.
  * @deferred:	Entry in wtd_deferred_reg_list which is used to
  *		register early initialized watchdogs.
+ * @reboot_timeout:
+ *		If non-zero, the timeout will be set to this value
+ *		on a reboot.  This lets a reboot be given more time.
  *
  * The watchdog_device structure contains all information about a
  * watchdog timer device.
@@ -125,6 +128,7 @@ struct watchdog_device {
 #define WDOG_HW_RUNNING		3	/* True if HW watchdog running */
 #define WDOG_STOP_ON_UNREGISTER	4	/* Should be stopped on unregister */
 	struct list_head deferred;
+	unsigned int reboot_timeout;
 };
 
 #define WATCHDOG_NOWAYOUT		IS_BUILTIN(CONFIG_WATCHDOG_NOWAYOUT)
