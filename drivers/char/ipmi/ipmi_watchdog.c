@@ -722,6 +722,85 @@ static int ipmi_wdog_stop(struct watchdog_device *wdd)
 	return 0;
 }
 
+/*
+ * These are for fetching the current watchdog timeout.  We use a
+ * separate set so we don't block a time set when getting the time.
+ */
+static DEFINE_MUTEX(ipmi_wdog_get_mutex);
+static atomic_t get_msg_tofree = ATOMIC_INIT(0);
+static DECLARE_COMPLETION(get_msg_wait);
+static void get_msg_free_smi(struct ipmi_smi_msg *msg)
+{
+	if (atomic_dec_and_test(&get_msg_tofree))
+		complete(&get_msg_wait);
+}
+static void get_msg_free_recv(struct ipmi_recv_msg *msg)
+{
+	if (atomic_dec_and_test(&get_msg_tofree))
+		complete(&get_msg_wait);
+}
+static struct ipmi_smi_msg get_smi_msg = {
+	.done = get_msg_free_smi
+};
+static struct ipmi_recv_msg get_recv_msg = {
+	.done = get_msg_free_recv
+};
+
+static unsigned int ipmi_wdog_get_timeleft(struct watchdog_device *wdd)
+{
+	struct kernel_ipmi_msg msg;
+	struct ipmi_system_interface_addr addr;
+	unsigned char *data;
+	int rv;
+	unsigned int currtime = 0;
+
+	mutex_lock(&ipmi_wdog_get_mutex);
+
+	atomic_set(&get_msg_tofree, 2);
+
+	addr.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+	addr.channel = IPMI_BMC_CHANNEL;
+	addr.lun = 0;
+
+	msg.netfn = 0x06;
+	msg.cmd = IPMI_WDOG_GET_TIMER;
+	msg.data = NULL;
+	msg.data_len = 0;
+	rv = ipmi_request_supply_msgs(watchdog_user,
+				      (struct ipmi_addr *) &addr,
+				      0, &msg, NULL,
+				      &get_smi_msg, &get_recv_msg, 1);
+	if (rv) {
+		pr_warn("get timeout error: %d\n", rv);
+		goto out;
+	}
+
+	wait_for_completion(&get_msg_wait);
+
+	if (get_recv_msg.msg.data_len < 1) {
+		pr_warn("get timeout received zero length message\n");
+		goto out;
+	}
+
+	data = get_recv_msg.msg.data;
+	if (data[0] != 0) {
+		pr_warn("get timeout received error: 0x%x\n", data[0]);
+		goto out;
+	}
+
+	if (get_recv_msg.msg.data_len < 9) {
+		pr_warn("get timeout received message too small, expected 9, got %u\n",
+			get_recv_msg.msg.data_len);
+		goto out;
+	}
+
+	currtime = data[7] | data[8] << 8;
+	currtime /= 10;
+ out:
+	mutex_unlock(&ipmi_wdog_get_mutex);
+	return currtime;
+}
+
 static ssize_t ipmi_wdog_read(struct watchdog_device *wdd,
 			      struct file *file,
 			      char        __user *buf,
@@ -807,6 +886,7 @@ static const struct watchdog_ops ipmi_wdog_ops = {
 	.set_timeout	= ipmi_wdog_set_timeout,
 	.set_pretimeout	= ipmi_wdog_set_pretimeout,
 	.ping		= ipmi_wdog_ping,
+	.get_timeleft	= ipmi_wdog_get_timeleft,
 	.read		= ipmi_wdog_read,
 	.poll		= ipmi_wdog_poll,
 	.fasync		= ipmi_wdog_fasync,
