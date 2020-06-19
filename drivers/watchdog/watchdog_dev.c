@@ -253,7 +253,7 @@ static enum hrtimer_restart watchdog_timer_expired(struct hrtimer *timer)
 }
 
 /*
- *	watchdog_start: wrapper to start the watchdog.
+ *	_watchdog_start: wrapper to start the watchdog.
  *	@wdd: the watchdog device to start
  *
  *	The caller must hold wd_data->lock.
@@ -263,7 +263,7 @@ static enum hrtimer_restart watchdog_timer_expired(struct hrtimer *timer)
  *	failure.
  */
 
-static int watchdog_start(struct watchdog_device *wdd)
+static int _watchdog_start(struct watchdog_device *wdd)
 {
 	struct watchdog_core_data *wd_data = wdd->wd_data;
 	ktime_t started_at;
@@ -288,6 +288,28 @@ static int watchdog_start(struct watchdog_device *wdd)
 
 	return err;
 }
+
+/*
+ *	watchdog_start: External interface to start the watchdog.
+ *	@wdd: the watchdog device to start
+ *
+ *	Start the watchdog if it is not active and mark it active.
+ *	This function returns zero on success or a negative errno code for
+ *	failure.
+ */
+
+int watchdog_start(struct watchdog_device *wdd)
+{
+	struct watchdog_core_data *wd_data = wdd->wd_data;
+	int err;
+
+	mutex_lock(&wd_data->lock);
+	err = _watchdog_start(wdd);
+	mutex_unlock(&wd_data->lock);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(watchdog_start);
 
 /*
  *	watchdog_stop: wrapper to stop the watchdog.
@@ -837,7 +859,7 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 				break;
 		}
 		if (val & WDIOS_ENABLECARD)
-			err = watchdog_start(wdd);
+			err = _watchdog_start(wdd);
 		break;
 	case WDIOC_KEEPALIVE:
 		if (!(wdd->info->options & WDIOF_KEEPALIVEPING)) {
@@ -935,7 +957,7 @@ static int watchdog_open(struct inode *inode, struct file *file)
 		goto out_clear;
 	}
 
-	err = watchdog_start(wdd);
+	err = _watchdog_start(wdd);
 	if (err < 0)
 		goto out_mod;
 
