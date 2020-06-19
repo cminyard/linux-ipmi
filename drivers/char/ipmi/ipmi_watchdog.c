@@ -27,7 +27,6 @@
 #include <linux/uaccess.h>
 #include <linux/notifier.h>
 #include <linux/nmi.h>
-#include <linux/reboot.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
 #include <linux/string.h>
@@ -139,9 +138,6 @@ static int pretimeout;
 
 /* Default timeout to set on panic */
 static int panic_wdt_timeout = 255;
-
-/* Default timeout to set on reboot */
-static int reboot_wdt_timeout = 120;
 
 /* Default action is to reset the board on a timeout. */
 static unsigned char action_val = WDOG_TIMEOUT_RESET;
@@ -321,7 +317,7 @@ MODULE_PARM_DESC(pretimeout, "Pretimeout value in seconds.");
 module_param(panic_wdt_timeout, timeout, 0644);
 MODULE_PARM_DESC(panic_wdt_timeout, "Timeout value on kernel panic in seconds.");
 
-module_param(reboot_wdt_timeout, timeout, 0644);
+module_param_named(reboot_wdt_timeout, ipmi_wdd.reboot_timeout, timeout, 0644);
 MODULE_PARM_DESC(reboot_wdt_timeout, "Timeout value on a reboot in seconds.");
 
 module_param_cb(action, &param_ops_str, action_op, 0644);
@@ -826,10 +822,12 @@ static struct watchdog_info ipmi_wdog_info = {
 static struct watchdog_device ipmi_wdd = {
 	.ops = &ipmi_wdog_ops,
 	.info = &ipmi_wdog_info,
+	.status = 1 << WDOG_STOP_ON_REBOOT,
 	.min_timeout = 1,
 	.max_timeout = 6553,
 	.min_hw_heartbeat_ms = 1,
 	.max_hw_heartbeat_ms = 65535,
+	.reboot_timeout = 120,
 };
 
 static void ipmi_wdog_msg_handler(struct ipmi_recv_msg *msg,
@@ -1066,40 +1064,6 @@ ipmi_nmi(unsigned int val, struct pt_regs *regs)
 }
 #endif
 
-static int wdog_reboot_handler(struct notifier_block *this,
-			       unsigned long         code,
-			       void                  *unused)
-{
-	static int reboot_event_handled;
-
-	if ((watchdog_user) && (!reboot_event_handled)) {
-		/* Make sure we only do this once. */
-		reboot_event_handled = 1;
-
-		if (code == SYS_POWER_OFF || code == SYS_HALT) {
-			/* Disable the WDT if we are shutting down. */
-			ipmi_watchdog_state = WDOG_TIMEOUT_NONE;
-			ipmi_set_timeout(&ipmi_wdd, IPMI_SET_TIMEOUT_NO_HB);
-		} else if (ipmi_watchdog_state != WDOG_TIMEOUT_NONE) {
-			/* Set a long timer to let the reboot happen or
-			   reset if it hangs, but only if the watchdog
-			   timer was already running. */
-			if (timeout < reboot_wdt_timeout)
-				timeout = reboot_wdt_timeout;
-			pretimeout = 0;
-			ipmi_watchdog_state = WDOG_TIMEOUT_RESET;
-			ipmi_set_timeout(&ipmi_wdd, IPMI_SET_TIMEOUT_NO_HB);
-		}
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block wdog_reboot_notifier = {
-	.notifier_call	= wdog_reboot_handler,
-	.next		= NULL,
-	.priority	= 0
-};
-
 static void ipmi_new_smi(int if_num, struct device *device)
 {
 	ipmi_register_watchdog(if_num);
@@ -1233,15 +1197,12 @@ static int __init ipmi_wdog_init(void)
 
 	check_parms();
 
-	register_reboot_notifier(&wdog_reboot_notifier);
-
 	rv = ipmi_smi_watcher_register(&smi_watcher);
 	if (rv) {
 #ifdef HAVE_DIE_NMI
 		if (nmi_handler_registered)
 			unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 #endif
-		unregister_reboot_notifier(&wdog_reboot_notifier);
 		pr_warn("can't register smi watcher\n");
 		return rv;
 	}
@@ -1260,8 +1221,6 @@ static void __exit ipmi_wdog_exit(void)
 	if (nmi_handler_registered)
 		unregister_nmi_handler(NMI_UNKNOWN, "ipmi");
 #endif
-
-	unregister_reboot_notifier(&wdog_reboot_notifier);
 }
 module_exit(ipmi_wdog_exit);
 module_init(ipmi_wdog_init);
