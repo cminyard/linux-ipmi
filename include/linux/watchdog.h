@@ -201,6 +201,10 @@ static inline void *watchdog_get_drvdata(struct watchdog_device *wdd)
 	return wdd->driver_data;
 }
 
+/* Allow the driver to set the timeout and pretimeout. */
+int watchdog_set_timeout(struct watchdog_device *wdd, unsigned int timeout);
+int watchdog_set_pretimeout(struct watchdog_device *wdd, unsigned int timeout);
+
 /* Use the following functions to report watchdog pretimeout event */
 #if IS_ENABLED(CONFIG_WATCHDOG_PRETIMEOUT_GOV)
 void watchdog_notify_pretimeout(struct watchdog_device *wdd);

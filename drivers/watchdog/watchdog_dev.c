@@ -364,14 +364,14 @@ static unsigned int watchdog_get_status(struct watchdog_device *wdd)
 }
 
 /*
- *	watchdog_set_timeout: set the watchdog timer timeout
+ *	_watchdog_set_timeout: set the watchdog timer timeout
  *	@wdd: the watchdog device to set the timeout for
  *	@timeout: timeout to set in seconds
  *
  *	The caller must hold wd_data->lock.
  */
 
-static int watchdog_set_timeout(struct watchdog_device *wdd,
+static int _watchdog_set_timeout(struct watchdog_device *wdd,
 							unsigned int timeout)
 {
 	int err = 0;
@@ -397,13 +397,34 @@ static int watchdog_set_timeout(struct watchdog_device *wdd,
 }
 
 /*
+ *	watchdog_set_timeout: set the watchdog timer timeout
+ *	@wdd: the watchdog device to set the timeout for
+ *	@timeout: timeout to set in seconds
+ */
+
+int watchdog_set_timeout(struct watchdog_device *wdd, unsigned int timeout)
+{
+	int err = 0;
+
+	if (!wdd->wd_data)
+		return -ENODEV;
+
+	mutex_lock(&wdd->wd_data->lock);
+	err = _watchdog_set_timeout(wdd, timeout);
+	mutex_unlock(&wdd->wd_data->lock);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(watchdog_set_timeout);
+
+/*
  *	watchdog_set_pretimeout: set the watchdog timer pretimeout
  *	@wdd: the watchdog device to set the timeout for
  *	@timeout: pretimeout to set in seconds
  */
 
-static int watchdog_set_pretimeout(struct watchdog_device *wdd,
-				   unsigned int timeout)
+static int _watchdog_set_pretimeout(struct watchdog_device *wdd,
+				    unsigned int timeout)
 {
 	int err = 0;
 
@@ -420,6 +441,27 @@ static int watchdog_set_pretimeout(struct watchdog_device *wdd,
 
 	return err;
 }
+
+/*
+ *	watchdog_set_pretimeout: set the watchdog timer pretimeout
+ *	@wdd: the watchdog device to set the timeout for
+ *	@timeout: pretimeout to set in seconds
+ */
+
+int watchdog_set_pretimeout(struct watchdog_device *wdd, unsigned int timeout)
+{
+	int err = 0;
+
+	if (!wdd->wd_data)
+		return -ENODEV;
+
+	mutex_lock(&wdd->wd_data->lock);
+	err = _watchdog_set_pretimeout(wdd, timeout);
+	mutex_unlock(&wdd->wd_data->lock);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(watchdog_set_pretimeout);
 
 /*
  *	watchdog_get_timeleft: wrapper to get the time left before a reboot
@@ -809,7 +851,7 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 			err = -EFAULT;
 			break;
 		}
-		err = watchdog_set_timeout(wdd, val);
+		err = _watchdog_set_timeout(wdd, val);
 		if (err < 0)
 			break;
 		/* If the watchdog is active then we send a keepalive ping
@@ -838,7 +880,7 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 			err = -EFAULT;
 			break;
 		}
-		err = watchdog_set_pretimeout(wdd, val);
+		err = _watchdog_set_pretimeout(wdd, val);
 		break;
 	case WDIOC_GETPRETIMEOUT:
 		err = put_user(wdd->pretimeout, p);
