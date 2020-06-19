@@ -132,6 +132,10 @@ The list of watchdog operations is defined as::
 	unsigned int (*get_timeleft)(struct watchdog_device *);
 	int (*restart)(struct watchdog_device *);
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
+	ssize_t (*read)(struct watchdog_device *, struct file *, char __user *,
+			size_t, loff_t *);
+	__poll_t (*poll)(struct watchdog_device *, struct file *, poll_table *);
+	int (*fasync)(struct watchdog_device *, int, struct file *, int);
   };
 
 It is important that you first define the module owner of the watchdog timer
@@ -235,6 +239,14 @@ they are supported. These optional routines/operations are:
   our own internal ioctl call handling. This routine should return -ENOIOCTLCMD
   if a command is not supported. The parameters that are passed to the ioctl
   call are: watchdog_device, cmd and arg.
+* read: If a read call comes in on the watchdog device, call this function.
+  This allows a watchdog to provide data to the user.
+* poll: If a poll call comes in on the watchdog device, call this.  This
+  allows the user to do select/poll waiting on the device to have read data
+  ready.
+* fasync: If a fasync call comes in on the watchdog, call this.  This
+  allows the user to do async operations waiting for read data from
+  the device.
 
 The status bits should (preferably) be set with the set_bit and clear_bit alike
 bit-operations. The status bits that are defined are:
