@@ -140,6 +140,9 @@ static int pretimeout;
 /* Default timeout to set on panic */
 static int panic_wdt_timeout = 255;
 
+/* Default timeout to set on reboot */
+static int reboot_wdt_timeout = 120;
+
 /* Default action is to reset the board on a timeout. */
 static unsigned char action_val = WDOG_TIMEOUT_RESET;
 
@@ -317,6 +320,9 @@ MODULE_PARM_DESC(pretimeout, "Pretimeout value in seconds.");
 
 module_param(panic_wdt_timeout, timeout, 0644);
 MODULE_PARM_DESC(panic_wdt_timeout, "Timeout value on kernel panic in seconds.");
+
+module_param(reboot_wdt_timeout, timeout, 0644);
+MODULE_PARM_DESC(reboot_wdt_timeout, "Timeout value on a reboot in seconds.");
 
 module_param_cb(action, &param_ops_str, action_op, 0644);
 MODULE_PARM_DESC(action, "Timeout action. One of: "
@@ -1078,8 +1084,8 @@ static int wdog_reboot_handler(struct notifier_block *this,
 			/* Set a long timer to let the reboot happen or
 			   reset if it hangs, but only if the watchdog
 			   timer was already running. */
-			if (timeout < 120)
-				timeout = 120;
+			if (timeout < reboot_wdt_timeout)
+				timeout = reboot_wdt_timeout;
 			pretimeout = 0;
 			ipmi_watchdog_state = WDOG_TIMEOUT_RESET;
 			ipmi_set_timeout(&ipmi_wdd, IPMI_SET_TIMEOUT_NO_HB);
