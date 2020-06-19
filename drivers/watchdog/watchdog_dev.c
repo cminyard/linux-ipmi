@@ -562,6 +562,21 @@ static ssize_t bootstatus_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(bootstatus);
 
+/*
+ * If _ms is in the attribute name, return milliseconds, otherwise
+ * return seconds.
+ */
+static unsigned int conv_time_to_attr_display(struct watchdog_device *wdd,
+					      struct device_attribute *attr,
+					      unsigned int val)
+{
+	bool in_msec = false;
+
+	if (strstr(attr->attr.name, "_ms"))
+		in_msec = true;
+	return watchdog_timeout_toexternal(wdd, in_msec, val);
+}
+
 static ssize_t timeleft_show(struct device *dev, struct device_attribute *attr,
 				char *buf)
 {
@@ -575,11 +590,12 @@ static ssize_t timeleft_show(struct device *dev, struct device_attribute *attr,
 	mutex_unlock(&wd_data->lock);
 	if (!status)
 		status = sprintf(buf, "%u\n",
-				 watchdog_timeout_toexternal(wdd, false, val));
+				 conv_time_to_attr_display(wdd, attr, val));
 
 	return status;
 }
 static DEVICE_ATTR_RO(timeleft);
+static DEVICE_ATTR(timeleft_ms, 0444, timeleft_show, NULL);
 
 static ssize_t timeout_show(struct device *dev, struct device_attribute *attr,
 				char *buf)
@@ -587,9 +603,10 @@ static ssize_t timeout_show(struct device *dev, struct device_attribute *attr,
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
 
 	return sprintf(buf, "%u\n",
-		       watchdog_timeout_toexternal(wdd, false, wdd->timeout));
+		       conv_time_to_attr_display(wdd, attr, wdd->timeout));
 }
 static DEVICE_ATTR_RO(timeout);
+static DEVICE_ATTR(timeout_ms, 0444, timeout_show, NULL);
 
 static ssize_t pretimeout_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
@@ -597,10 +614,10 @@ static ssize_t pretimeout_show(struct device *dev,
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
 
 	return sprintf(buf, "%u\n",
-		       watchdog_timeout_toexternal(wdd, false,
-						   wdd->pretimeout));
+		       conv_time_to_attr_display(wdd, attr, wdd->pretimeout));
 }
 static DEVICE_ATTR_RO(pretimeout);
+static DEVICE_ATTR(pretimeout_ms, 0444, pretimeout_show, NULL);
 
 static ssize_t identity_show(struct device *dev, struct device_attribute *attr,
 				char *buf)
@@ -677,8 +694,11 @@ static struct attribute *wdt_attrs[] = {
 	&dev_attr_state.attr,
 	&dev_attr_identity.attr,
 	&dev_attr_timeout.attr,
+	&dev_attr_timeout_ms.attr,
 	&dev_attr_pretimeout.attr,
+	&dev_attr_pretimeout_ms.attr,
 	&dev_attr_timeleft.attr,
+	&dev_attr_timeleft_ms.attr,
 	&dev_attr_bootstatus.attr,
 	&dev_attr_status.attr,
 	&dev_attr_nowayout.attr,
