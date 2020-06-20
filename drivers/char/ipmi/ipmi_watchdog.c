@@ -799,6 +799,7 @@ static int ipmi_wdog_fasync(struct watchdog_device *wdd,
 }
 
 static const struct watchdog_ops ipmi_wdog_ops = {
+	.owner		= THIS_MODULE,
 	.start		= ipmi_wdog_start,
 	.stop		= ipmi_wdog_stop,
 	.set_timeout	= ipmi_wdog_set_timeout,
