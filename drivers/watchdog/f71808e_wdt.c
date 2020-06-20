@@ -218,7 +218,7 @@ static inline void superio_exit(int base)
 	release_region(base, 2);
 }
 
-static int watchdog_set_timeout(int timeout)
+static int f71808e_watchdog_set_timeout(int timeout)
 {
 	if (timeout <= 0
 	 || timeout >  max_timeout) {
@@ -327,7 +327,7 @@ static int f71862fg_pin_configure(unsigned short ioaddr)
 	return 0;
 }
 
-static int watchdog_start(void)
+static int f71808e_watchdog_start(void)
 {
 	int err;
 	u8 tmp;
@@ -516,7 +516,7 @@ static int watchdog_open(struct inode *inode, struct file *file)
 	if (test_and_set_bit(0, &watchdog.opened))
 		return -EBUSY;
 
-	err = watchdog_start();
+	err = f71808e_watchdog_start();
 	if (err) {
 		clear_bit(0, &watchdog.opened);
 		return err;
@@ -628,7 +628,7 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 			watchdog_stop();
 
 		if (new_options & WDIOS_ENABLECARD)
-			return watchdog_start();
+			return f71808e_watchdog_start();
 		/* fall through */
 
 	case WDIOC_KEEPALIVE:
@@ -639,7 +639,7 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 		if (get_user(new_timeout, uarg.i))
 			return -EFAULT;
 
-		if (watchdog_set_timeout(new_timeout))
+		if (f71808e_watchdog_set_timeout(new_timeout))
 			return -EINVAL;
 
 		watchdog_keepalive();
@@ -708,7 +708,7 @@ static int __init watchdog_init(int sioaddr)
 
 	superio_exit(sioaddr);
 
-	err = watchdog_set_timeout(timeout);
+	err = f71808e_watchdog_set_timeout(timeout);
 	if (err)
 		return err;
 	err = watchdog_set_pulse_width(pulse_width);
@@ -734,7 +734,7 @@ static int __init watchdog_init(int sioaddr)
 			goto exit_miscdev;
 		}
 
-		err = watchdog_start();
+		err = f71808e_watchdog_start();
 		if (err) {
 			pr_err("cannot start watchdog timer\n");
 			goto exit_miscdev;
