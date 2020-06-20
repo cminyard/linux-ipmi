@@ -242,8 +242,8 @@ EXPORT_SYMBOL(sch56xx_read_virtual_reg12);
  * Watchdog routines
  */
 
-static int watchdog_set_timeout(struct watchdog_device *wddev,
-				unsigned int timeout)
+static int sch56xx_watchdog_set_timeout(struct watchdog_device *wddev,
+					unsigned int timeout)
 {
 	struct sch56xx_watchdog_data *data = watchdog_get_drvdata(wddev);
 	unsigned int resolution;
@@ -286,7 +286,7 @@ static int watchdog_set_timeout(struct watchdog_device *wddev,
 	return 0;
 }
 
-static int watchdog_start(struct watchdog_device *wddev)
+static int sch56xx_watchdog_start(struct watchdog_device *wddev)
 {
 	struct sch56xx_watchdog_data *data = watchdog_get_drvdata(wddev);
 	int ret;
@@ -338,7 +338,7 @@ leave:
 	return ret;
 }
 
-static int watchdog_trigger(struct watchdog_device *wddev)
+static int sch56xx_watchdog_trigger(struct watchdog_device *wddev)
 {
 	struct sch56xx_watchdog_data *data = watchdog_get_drvdata(wddev);
 	int ret;
@@ -352,7 +352,7 @@ static int watchdog_trigger(struct watchdog_device *wddev)
 	return ret;
 }
 
-static int watchdog_stop(struct watchdog_device *wddev)
+static int sch56xx_watchdog_stop(struct watchdog_device *wddev)
 {
 	struct sch56xx_watchdog_data *data = watchdog_get_drvdata(wddev);
 	int ret = 0;
@@ -372,10 +372,10 @@ static int watchdog_stop(struct watchdog_device *wddev)
 
 static const struct watchdog_ops watchdog_ops = {
 	.owner		= THIS_MODULE,
-	.start		= watchdog_start,
-	.stop		= watchdog_stop,
-	.ping		= watchdog_trigger,
-	.set_timeout	= watchdog_set_timeout,
+	.start		= sch56xx_watchdog_start,
+	.stop		= sch56xx_watchdog_stop,
+	.ping		= sch56xx_watchdog_trigger,
+	.set_timeout	= sch56xx_watchdog_set_timeout,
 };
 
 struct sch56xx_watchdog_data *sch56xx_watchdog_register(struct device *parent,
