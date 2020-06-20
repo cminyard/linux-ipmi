@@ -83,6 +83,8 @@ config IPMI_POWERNV
 
 config IPMI_WATCHDOG
 	tristate 'IPMI Watchdog Timer'
+	select WATCHDOG
+	select WATCHDOG_CORE
 	help
 	  This enables the IPMI watchdog timer.
 
