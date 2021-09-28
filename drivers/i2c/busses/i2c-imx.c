@@ -38,7 +38,7 @@
 #include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
-#include <linux/timer.h>
+#include <linux/hrtimer.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
@@ -52,6 +52,8 @@
 
 /* This will be the driver name the kernel reports */
 #define DRIVER_NAME "imx-i2c"
+
+#define I2C_IMX_CHECK_DELAY 30000 /* Time to check for bus idle, in NS */
 
 /*
  * Enable DMA if transfer byte size is bigger than this threshold.
@@ -214,8 +216,8 @@ struct imx_i2c_struct {
 	enum i2c_slave_event last_slave_event;
 
 	/* For checking slave events. */
-	spinlock_t	  slave_lock;
-	struct timer_list slave_timer;
+	spinlock_t     slave_lock;
+	struct hrtimer slave_timer;
 };
 
 static const struct imx_i2c_hwdata imx1_i2c_hwdata = {
@@ -783,13 +785,16 @@ static irqreturn_t i2c_imx_slave_handle(struct imx_i2c_struct *i2c_imx,
 	}
 
 out:
-	mod_timer(&i2c_imx->slave_timer, jiffies + 1);
+	hrtimer_try_to_cancel(&i2c_imx->slave_timer);
+	hrtimer_forward_now(&i2c_imx->slave_timer, I2C_IMX_CHECK_DELAY);
+	hrtimer_restart(&i2c_imx->slave_timer);
 	return IRQ_HANDLED;
 }
 
-static void i2c_imx_slave_timeout(struct timer_list *t)
+static enum hrtimer_restart i2c_imx_slave_timeout(struct hrtimer *t)
 {
-	struct imx_i2c_struct *i2c_imx = from_timer(i2c_imx, t, slave_timer);
+	struct imx_i2c_struct *i2c_imx = container_of(t, struct imx_i2c_struct,
+						      slave_timer);
 	unsigned int ctl, status;
 	unsigned long flags;
 
@@ -798,6 +803,7 @@ static void i2c_imx_slave_timeout(struct timer_list *t)
 	ctl = imx_i2c_read_reg(i2c_imx, IMX_I2C_I2CR);
 	i2c_imx_slave_handle(i2c_imx, status, ctl);
 	spin_unlock_irqrestore(&i2c_imx->slave_lock, flags);
+	return HRTIMER_NORESTART;
 }
 
 static void i2c_imx_slave_init(struct imx_i2c_struct *i2c_imx)
@@ -1423,7 +1429,8 @@ static int i2c_imx_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	spin_lock_init(&i2c_imx->slave_lock);
-	timer_setup(&i2c_imx->slave_timer, i2c_imx_slave_timeout, 0);
+	hrtimer_init(&i2c_imx->slave_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+	i2c_imx->slave_timer.function = i2c_imx_slave_timeout;
 
 	match = device_get_match_data(&pdev->dev);
 	if (match)
@@ -1538,7 +1545,7 @@ static int i2c_imx_remove(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	del_timer_sync(&i2c_imx->slave_timer);
+	hrtimer_cancel(&i2c_imx->slave_timer);
 
 	/* remove adapter */
 	dev_dbg(&i2c_imx->adapter.dev, "adapter removed\n");
