@@ -90,6 +90,7 @@ struct ipmi_ipmb_direct_addr {
 	int           addr_type;
 	short         channel;
 	unsigned char slave_addr;
+	unsigned char rs_lun;
 	unsigned char rq_lun;
 };
 

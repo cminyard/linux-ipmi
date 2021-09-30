@@ -817,7 +817,8 @@ ipmi_addr_equal(struct ipmi_addr *addr1, struct ipmi_addr *addr2)
 			= (struct ipmi_ipmb_direct_addr *) addr2;
 
 		return daddr1->slave_addr == daddr2->slave_addr &&
-			daddr1->rq_lun == daddr2->rq_lun;
+			daddr1->rq_lun == daddr2->rq_lun &&
+			daddr1->rs_lun == daddr2->rs_lun;
 	}
 
 	if (is_lan_addr(addr1)) {
@@ -869,6 +870,8 @@ int ipmi_validate_addr(struct ipmi_addr *addr, int len)
 		if (daddr->slave_addr & 0x01)
 			return -EINVAL;
 		if (daddr->rq_lun >= 4)
+			return -EINVAL;
+		if (daddr->rs_lun >= 4)
 			return -EINVAL;
 		return 0;
 	}
@@ -2111,7 +2114,7 @@ static int i_ipmi_req_ipmb_direct(struct ipmi_smi        *intf,
 	}
 
 	daddr = (struct ipmi_ipmb_direct_addr *) addr;
-	if (daddr->rq_lun > 3) {
+	if (daddr->rq_lun > 3 || daddr->rs_lun > 3) {
 		ipmi_inc_stat(intf, sent_invalid_commands);
 		return -EINVAL;
 	}
@@ -2119,9 +2122,14 @@ static int i_ipmi_req_ipmb_direct(struct ipmi_smi        *intf,
 	smi_msg->type = IPMI_SMI_MSG_TYPE_IPMB_DIRECT;
 	smi_msg->msgid = msgid;
 
-	smi_msg->data[0] = msg->netfn << 2 | daddr->rq_lun;
+	if (is_cmd) {
+		smi_msg->data[0] = msg->netfn << 2 | daddr->rs_lun;
+		smi_msg->data[2] = recv_msg->msgid << 2 | daddr->rq_lun;
+	} else {
+		smi_msg->data[0] = msg->netfn << 2 | daddr->rq_lun;
+		smi_msg->data[2] = recv_msg->msgid << 2 | daddr->rs_lun;
+	}
 	smi_msg->data[1] = daddr->slave_addr;
-	smi_msg->data[2] = recv_msg->msgid << 2 | source_lun;
 	smi_msg->data[3] = msg->cmd;
 
 	memcpy(smi_msg->data + 4, msg->data, msg->data_len);
@@ -3944,6 +3952,7 @@ static int handle_ipmb_direct_rcv_cmd(struct ipmi_smi *intf,
 			daddr->addr_type = IPMI_IPMB_DIRECT_ADDR_TYPE;
 			daddr->channel = 0;
 			daddr->slave_addr = msg->rsp[1];
+			daddr->rs_lun = msg->rsp[0] & 3;
 			daddr->rq_lun = msg->rsp[2] & 3;
 
 			/*
@@ -3989,7 +3998,8 @@ static int handle_ipmb_direct_rcv_rsp(struct ipmi_smi *intf,
 	daddr->addr_type = IPMI_IPMB_DIRECT_ADDR_TYPE;
 	daddr->channel = 0;
 	daddr->slave_addr = msg->rsp[1];
-	daddr->rq_lun = msg->rsp[2] & 3;
+	daddr->rq_lun = msg->rsp[0] & 3;
+	daddr->rs_lun = msg->rsp[2] & 3;
 	recv_msg->msg.netfn = msg->rsp[0] >> 2;
 	recv_msg->msg.cmd = msg->rsp[3];
 	memcpy(recv_msg->msg_data, &msg->rsp[4], msg->rsp_size - 4);
