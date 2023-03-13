@@ -4895,6 +4895,7 @@ static void ipmi_panic_request_and_wait(struct ipmi_smi *intf,
 			    intf->addrinfo[0].address,
 			    intf->addrinfo[0].lun,
 			    0, 1); /* Don't retry, and don't wait. */
+	pr_info("Panic message return: %d\n", rv);
 	if (rv)
 		atomic_sub(2, &panic_done_count);
 	else if (intf->handlers->flush_messages)
@@ -4942,9 +4943,13 @@ static void send_panic_events(struct ipmi_smi *intf, char *str)
 	struct ipmi_ipmb_addr *ipmb;
 	int j;
 
+	pr_info("IPMI: Sending panic event: %d %s\n",
+		ipmi_send_panic_event, str ? str : "<NULL>");
+
 	if (ipmi_send_panic_event == IPMI_SEND_PANIC_EVENT_NONE)
 		return;
 
+	pr_info("IPMI: Adding standard panic event\n");
 	si = (struct ipmi_system_interface_addr *) &addr;
 	si->addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
 	si->channel = IPMI_BMC_CHANNEL;
@@ -5026,6 +5031,9 @@ static void send_panic_events(struct ipmi_smi *intf, char *str)
 	 * be 1 (it must be a valid IPMB address), it cannot
 	 * be zero, and it must not be my address.
 	 */
+	pr_info("IPMI: Setting up for panic strings: %d %d %d\n",
+		intf->event_receiver, intf->addrinfo[0].address,
+		intf->local_sel_device);
 	if (((intf->event_receiver & 1) == 0)
 	    && (intf->event_receiver != 0)
 	    && (intf->event_receiver != intf->addrinfo[0].address)) {
@@ -5060,6 +5068,8 @@ static void send_panic_events(struct ipmi_smi *intf, char *str)
 	while (*p) {
 		int size = strlen(p);
 
+		pr_info("IPMI: Adding panic string\n");
+
 		if (size > 11)
 			size = 11;
 		data[0] = 0;
@@ -5076,6 +5086,7 @@ static void send_panic_events(struct ipmi_smi *intf, char *str)
 
 		ipmi_panic_request_and_wait(intf, &addr, &msg);
 	}
+	pr_info("IPMI: Sending panic event done\n");
 }
 
 static int has_panicked;
@@ -5087,12 +5098,18 @@ static int panic_event(struct notifier_block *this,
 	struct ipmi_smi *intf;
 	struct ipmi_user *user;
 
+	pr_info("IPMI: panic event handler\n");
+
 	if (has_panicked)
 		return NOTIFY_DONE;
 	has_panicked = 1;
 
 	/* For every registered interface, set it to run to completion. */
 	list_for_each_entry_rcu(intf, &ipmi_interfaces, link) {
+		pr_info("IPMI: handling panic event for intf %d: %p %p\n",
+			intf->intf_num, intf->handlers,
+			intf->handlers ? intf->handlers->poll : NULL);
+
 		if (!intf->handlers || intf->intf_num == -1)
 			/* Interface is not ready. */
 			continue;
@@ -5127,9 +5144,12 @@ static int panic_event(struct notifier_block *this,
 				user->handler->ipmi_panic_handler(
 					user->handler_data);
 		}
+		pr_info("IPMI: Calling panic event handler\n");
 
 		send_panic_events(intf, ptr);
 	}
+
+	pr_info("IPMI: panic event handler done\n");
 
 	return NOTIFY_DONE;
 }
