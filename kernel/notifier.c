@@ -98,6 +98,41 @@ static int notifier_call_chain(struct notifier_block **nl,
 }
 NOKPROBE_SYMBOL(notifier_call_chain);
 
+static int notifier_call_chain_debug(struct notifier_block **nl,
+				     unsigned long val, void *v,
+				     int nr_to_call, int *nr_calls)
+{
+	int ret = NOTIFY_DONE;
+	struct notifier_block *nb, *next_nb;
+
+	nb = rcu_dereference_raw(*nl);
+
+	while (nb && nr_to_call) {
+		next_nb = rcu_dereference_raw(nb->next);
+
+#ifdef CONFIG_DEBUG_NOTIFIERS
+		if (unlikely(!func_ptr_is_kernel_text(nb->notifier_call))) {
+			WARN(1, "Invalid notifier called!");
+			nb = next_nb;
+			continue;
+		}
+#endif
+		pr_info("Calling notifier %pS (%p)\n", nb->notifier_call,
+			nb->notifier_call);
+		ret = nb->notifier_call(nb, val, v);
+		pr_info("Return from notifier: %d\n", ret);
+
+		if (nr_calls)
+			(*nr_calls)++;
+
+		if (ret & NOTIFY_STOP_MASK)
+			break;
+		nb = next_nb;
+		nr_to_call--;
+	}
+	return ret;
+}
+
 /**
  * notifier_call_chain_robust - Inform the registered notifiers about an event
  *                              and rollback on error.
@@ -229,6 +264,20 @@ int atomic_notifier_call_chain(struct atomic_notifier_head *nh,
 }
 EXPORT_SYMBOL_GPL(atomic_notifier_call_chain);
 NOKPROBE_SYMBOL(atomic_notifier_call_chain);
+
+int atomic_notifier_call_chain_debug(struct atomic_notifier_head *nh,
+				     unsigned long val, void *v)
+{
+	int ret;
+
+	rcu_read_lock();
+	ret = notifier_call_chain_debug(&nh->head, val, v, -1, NULL);
+	rcu_read_unlock();
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(atomic_notifier_call_chain_debug);
+NOKPROBE_SYMBOL(atomic_notifier_call_chain_debug);
 
 /**
  *	atomic_notifier_call_chain_is_empty - Check whether notifier chain is empty
