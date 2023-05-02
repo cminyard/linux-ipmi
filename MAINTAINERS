@@ -10796,6 +10796,7 @@ T:	git https://github.com/cminyard/linux-ipmi.git for-next
 F:	Documentation/driver-api/ipmi.rst
 F:	Documentation/devicetree/bindings/ipmi/
 F:	drivers/char/ipmi/
+F:	drivers/watchdog/ipmi_wdt.c
 F:	include/linux/ipmi*
 F:	include/uapi/linux/ipmi*
 

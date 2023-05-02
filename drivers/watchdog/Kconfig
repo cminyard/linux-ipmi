@@ -350,6 +350,17 @@ config SL28CPLD_WATCHDOG
 	  To compile this driver as a module, choose M here: the
 	  module will be called sl28cpld_wdt.
 
+config IPMI_WDT
+	tristate "IPMI Watchdog Timer"
+	depends on IPMI_HANDLER
+	select WATCHDOG_CORE
+	help
+	  IPMI watchdog timer integrated into the watchdog framework.
+	  Note that you cannot use this driver with the old IPMI watchdog
+	  driver (IPMI_WATCHDOG).
+
+	  If unsure, say Y.
+
 # ALPHA Architecture
 
 # ARM Architecture

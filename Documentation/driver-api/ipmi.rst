@@ -114,9 +114,8 @@ over the SMBus.
 
 ipmi_powernv - A driver for access BMCs on POWERNV systems.
 
-ipmi_watchdog - IPMI requires systems to have a very capable watchdog
-timer.  This driver implements the standard Linux watchdog timer
-interface on top of the IPMI message handler.
+ipmi_watchdog - This is the old IPMI watchdog driver, the new one is
+in the watchdog directory and is in driver/watchdog/ipmi_wdt.c.
 
 ipmi_poweroff - Some systems support the ability to be turned off via
 IPMI commands.
@@ -664,12 +663,11 @@ Watchdog
 --------
 
 A watchdog timer is provided that implements the Linux-standard
-watchdog timer interface.  It has three module parameters that can be
+watchdog timer interface.  It has module parameters that can be
 used to control it::
 
-  modprobe ipmi_watchdog timeout=<t> pretimeout=<t> action=<action type>
-      preaction=<preaction type> preop=<preop type> start_now=x
-      nowayout=x ifnum_to_use=n panic_wdt_timeout=<t>
+  modprobe ipmi_wdt timeout=<t> pretimeout=<t> nowayout[=x]
+      ifnum_to_use=n panic_wdt_timeout=<t> test_pretimeout[=x]
 
 ifnum_to_use specifies which interface the watchdog timer should use.
 The default is -1, which means to pick the first one registered.
@@ -679,46 +677,26 @@ is the amount of seconds before the reset that the pre-timeout panic will
 occur (if pretimeout is zero, then pretimeout will not be enabled).  Note
 that the pretimeout is the time before the final timeout.  So if the
 timeout is 50 seconds and the pretimeout is 10 seconds, then the pretimeout
-will occur in 40 second (10 seconds before the timeout). The panic_wdt_timeout
-is the value of timeout which is set on kernel panic, in order to let actions
-such as kdump to occur during panic.
+will occur in 40 second (10 seconds before the timeout).
 
-The action may be "reset", "power_cycle", or "power_off", and
-specifies what to do when the timer times out, and defaults to
-"reset".
-
-The preaction may be "pre_smi" for an indication through the SMI
-interface, "pre_int" for an indication through the SMI with an
-interrupts, and "pre_nmi" for a NMI on a preaction.  This is how
-the driver is informed of the pretimeout.
-
-The preop may be set to "preop_none" for no operation on a pretimeout,
-"preop_panic" to set the preoperation to panic, or "preop_give_data"
-to provide data to read from the watchdog device when the pretimeout
-occurs.  A "pre_nmi" setting CANNOT be used with "preop_give_data"
-because you can't do data operations from an NMI.
-
-When preop is set to "preop_give_data", one byte comes ready to read
-on the device when the pretimeout occurs.  Select and fasync work on
-the device, as well.
-
-If start_now is set to 1, the watchdog timer will start running as
-soon as the driver is loaded.
-
-If nowayout is set to 1, the watchdog timer will not stop when the
+If nowayout is enabled, the watchdog timer will not stop when the
 watchdog device is closed.  The default value of nowayout is true
 if the CONFIG_WATCHDOG_NOWAYOUT option is enabled, or false if not.
+
+panic_wdt_timeout is the value of timeout which is set on kernel
+panic, in order to let actions such as kernel dump to occur during
+panic.  It defaults to 255 seconds.
+
+If test_pretimeout is enabled, then a test is done on the NMI timeout
+to verify that it works.  The results are printed to the system log.
 
 When compiled into the kernel, the kernel command line is available
 for configuring the watchdog::
 
-  ipmi_watchdog.timeout=<t> ipmi_watchdog.pretimeout=<t>
-	ipmi_watchdog.action=<action type>
-	ipmi_watchdog.preaction=<preaction type>
-	ipmi_watchdog.preop=<preop type>
-	ipmi_watchdog.start_now=x
-	ipmi_watchdog.nowayout=x
-	ipmi_watchdog.panic_wdt_timeout=<t>
+  ipmi_wdt.timeout=<t> ipmi_wdt.pretimeout=<t>
+	ipmi_wdt.nowayout=x
+	ipmi_wdt.panic_wdt_timeout=<t>
+	ipmi_wdt.test_pretimeout=<t>
 
 The options are the same as the module parameter options.
 
