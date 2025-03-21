@@ -3713,6 +3713,10 @@ void ipmi_unregister_smi(struct ipmi_smi *intf)
 
 	if (!intf)
 		return;
+
+	if (intf->handlers->shutdown)
+		intf->handlers->shutdown(intf->send_info);
+
 	intf_num = intf->intf_num;
 	mutex_lock(&ipmi_interfaces_mutex);
 	cancel_work_sync(&intf->smi_work);
@@ -3745,9 +3749,6 @@ void ipmi_unregister_smi(struct ipmi_smi *intf)
 		_ipmi_destroy_user(user);
 	}
 	mutex_unlock(&intf->users_mutex);
-
-	if (intf->handlers->shutdown)
-		intf->handlers->shutdown(intf->send_info);
 
 	cleanup_smi_msgs(intf);
 
