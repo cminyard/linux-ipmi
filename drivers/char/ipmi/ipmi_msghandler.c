@@ -726,6 +726,7 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 	struct ipmi_smi *intf;
 	unsigned int count = 0, i;
 	int *interfaces = NULL;
+	struct device **devices = NULL;
 	int rv = 0;
 
 	/*
@@ -741,9 +742,10 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 	list_add(&watcher->link, &smi_watchers);
 
 	/*
-	 * Build an array of ipmi interfaces and fill it in.  We can't
-	 * call the callback with ipmi_interfaces_mutex held.
-	 * smi_watchers_mutex will keep things in order for the user.
+	 * Build an array of ipmi interfaces and fill it in, and
+	 * another array of the devices.  We can't call the callback
+	 * with ipmi_interfaces_mutex held.  smi_watchers_mutex will
+	 * keep things in order for the user.
 	 */
 	mutex_lock(&ipmi_interfaces_mutex);
 	list_for_each_entry(intf, &ipmi_interfaces, link)
@@ -751,8 +753,17 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 	if (count > 0) {
 		interfaces = kmalloc_array(count, sizeof(*interfaces),
 					   GFP_KERNEL);
-		if (!interfaces)
+		if (!interfaces) {
 			rv = -ENOMEM;
+		} else {
+			devices = kmalloc_array(count, sizeof(*devices),
+						GFP_KERNEL);
+			if (!devices) {
+				kfree(interfaces);
+				interfaces = NULL;
+				rv = -ENOMEM;
+			}
+		}
 		count = 0;
 	}
 	if (interfaces) {
@@ -761,6 +772,7 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 
 			if (intf_num == -1)
 				continue;
+			devices[count] = intf->si_dev;
 			interfaces[count++] = intf_num;
 		}
 	}
@@ -768,8 +780,9 @@ int ipmi_smi_watcher_register(struct ipmi_smi_watcher *watcher)
 
 	if (interfaces) {
 		for (i = 0; i < count; i++)
-			watcher->new_smi(interfaces[i], intf->si_dev);
+			watcher->new_smi(interfaces[i], devices[i]);
 		kfree(interfaces);
+		kfree(devices);
 	}
 
 	mutex_unlock(&smi_watchers_mutex);
@@ -3709,13 +3722,8 @@ void ipmi_unregister_smi(struct ipmi_smi *intf)
 	struct ipmi_smi_watcher *w;
 	int intf_num;
 
-	/* Caller must not deliver any more messages after this is called. */
-
 	if (!intf)
 		return;
-
-	if (intf->handlers->shutdown)
-		intf->handlers->shutdown(intf->send_info);
 
 	intf_num = intf->intf_num;
 	mutex_lock(&ipmi_interfaces_mutex);
@@ -3753,6 +3761,9 @@ void ipmi_unregister_smi(struct ipmi_smi *intf)
 	cleanup_smi_msgs(intf);
 
 	ipmi_bmc_unregister(intf);
+
+	if (intf->handlers->shutdown)
+		intf->handlers->shutdown(intf->send_info);
 
 	kref_put(&intf->refcount, intf_free);
 }
