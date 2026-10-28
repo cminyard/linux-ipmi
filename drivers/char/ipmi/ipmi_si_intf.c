@@ -83,6 +83,12 @@ const struct ipmi_match_info ipmi_bt_si_info = { .type = SI_BT };
 static bool initialized;
 
 /*
+ * Keep the creation of IPMI interfaces in order.  The work items take
+ * time so the bh workqueues cannot be used.
+ */
+static struct workqueue_struct *ipmi_workqueue;
+
+/*
  * Indexes into stats[] in smi_info below.
  */
 enum si_stat_indexes {
@@ -2012,7 +2018,7 @@ int ipmi_si_add_smi(struct si_sm_io *io)
 
 	if (initialized) {
 		if (IS_ENABLED(CONFIG_IPMI_SI_ASYNC_INIT))
-			queue_work(system_dfl_wq, &new_smi->init_work);
+			queue_work(ipmi_workqueue, &new_smi->init_work);
 		else
 			rv = try_smi_init(new_smi);
 	}
@@ -2204,9 +2210,15 @@ static int __init init_ipmi_si(void)
 	if (initialized)
 		return 0;
 
-	ipmi_hardcode_init();
-
 	pr_info("IPMI System Interface driver\n");
+
+	ipmi_workqueue = alloc_ordered_workqueue("ipmi_start", 0);
+	if (!ipmi_workqueue) {
+		pr_err("%s: Unable to allocate workqueue\n", __FILE__);
+		return -ENOMEM;
+	}
+
+	ipmi_hardcode_init();
 
 	ipmi_si_platform_init();
 
@@ -2244,7 +2256,7 @@ static int __init init_ipmi_si(void)
 		}
 		if (!dup) {
 			if (IS_ENABLED(CONFIG_IPMI_SI_ASYNC_INIT))
-				queue_work(system_unbound_wq, &e->init_work);
+				queue_work(ipmi_workqueue, &e->init_work);
 			else
 				try_smi_init(e);
 		}
@@ -2282,7 +2294,7 @@ static int __init init_ipmi_si(void)
 		}
 		if (!dup) {
 			if (IS_ENABLED(CONFIG_IPMI_SI_ASYNC_INIT))
-				queue_work(system_unbound_wq, &e->init_work);
+				queue_work(ipmi_workqueue, &e->init_work);
 			else
 				try_smi_init(e);
 		}
@@ -2463,6 +2475,9 @@ static void cleanup_ipmi_si(void)
 
 	ipmi_si_hardcode_exit();
 	ipmi_si_hotmod_exit();
+
+	/* Nothing can be scheduled for work at this point. */
+	destroy_workqueue(ipmi_workqueue);
 }
 module_exit(cleanup_ipmi_si);
 
